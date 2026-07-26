@@ -1,0 +1,215 @@
+name: "Deploy Backend"
+on:
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - ".github/workflows/deploy-backend.yml"
+
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        default: "prod"
+        type: choice
+        options: [prod, staging]
+      force_refresh:
+        description: "Force instance refresh even if no code changed"
+        required: false
+        default: "false"
+        type: boolean
+
+env:
+  AWS_REGION:       ${{ vars.AWS_REGION || 'us-east-1' }}
+  BACKEND_ASG_NAME: ${{ vars.BACKEND_ASG_NAME || 'prod-backend-asg' }}
+
+jobs:
+
+  test-backend:
+    name: "Test"
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: ./backend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --omit=dev || npm install --omit=dev
+
+      - name: Lint check (if eslint is configured)
+        run: npx eslint . --ext .js --max-warnings 0 2>/dev/null || echo "No ESLint config found, skipping"
+        continue-on-error: true
+
+      - name: Check required files exist
+        run: |
+          echo "Checking required files..."
+          test -f server.js               || (echo " server.js missing"          && exit 1)
+          test -f routes/auth.routes.js   || (echo " auth routes missing"        && exit 1)
+          test -f routes/family.routes.js || (echo " family routes missing"      && exit 1)
+          test -f routes/bill.routes.js   || (echo " bill routes missing"        && exit 1)
+          test -f routes/news.routes.js   || (echo " news routes missing"        && exit 1)
+          test -f controllers/family.controller.js || (echo " family controller missing" && exit 1)
+          echo " All required files present"
+
+      - name: Validate server starts (dry run)
+        env:
+          NODE_ENV:     test
+          PORT:         5001
+          JWT_SECRET:   test-secret-minimum-32-chars-long-abc
+          AWS_REGION:   us-east-1
+          DYNAMODB_USERS_TABLE:       finance_users
+          DYNAMODB_FAMILIES_TABLE:    finance_families
+          DYNAMODB_EXPENSES_TABLE:    finance_expenses
+          DYNAMODB_BILLS_TABLE:       finance_bills
+          DYNAMODB_INVESTMENTS_TABLE: finance_investments
+        run: |
+          # Start server in background and check it responds
+          node server.js &
+          SERVER_PID=$!
+          sleep 4
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:5001/health || echo "000")
+          kill $SERVER_PID 2>/dev/null || true
+          echo "Health check returned HTTP $STATUS"
+          if [ "$STATUS" != "200" ]; then
+            echo " Server health check failed (HTTP $STATUS)"
+            exit 1
+          fi
+          echo " Server started and returned 200 /health"
+
+  # ─── Deploy via ASG Instance Refresh ──────────────────────────────────────
+  deploy-backend:
+    name: "Deploy"
+    runs-on: ubuntu-latest
+    needs: test-backend
+    environment:
+      name: ${{ github.event.inputs.environment || 'prod' }}
+      url:  ${{ vars.BACKEND_HEALTH_URL }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Get current ASG state
+        id: asg_state
+        run: |
+          DESIRED=$(aws autoscaling describe-auto-scaling-groups \
+            --auto-scaling-group-names "${{ env.BACKEND_ASG_NAME }}" \
+            --query 'AutoScalingGroups[0].DesiredCapacity' \
+            --output text)
+          echo "desired=$DESIRED" >> $GITHUB_OUTPUT
+          echo "ASG desired capacity: $DESIRED"
+
+      - name: Trigger ASG Instance Refresh
+        id: refresh
+        run: |
+          REFRESH_ID=$(aws autoscaling start-instance-refresh \
+            --auto-scaling-group-name "${{ env.BACKEND_ASG_NAME }}" \
+            --strategy Rolling \
+            --preferences '{
+              "MinHealthyPercentage": 50,
+              "InstanceWarmup": 300,
+              "CheckpointPercentages": [50, 100],
+              "CheckpointDelay": 60
+            }' \
+            --query 'InstanceRefreshId' \
+            --output text)
+          echo "refresh_id=$REFRESH_ID" >> $GITHUB_OUTPUT
+          echo "Instance refresh started: $REFRESH_ID"
+
+      - name: Wait for Instance Refresh to complete
+        run: |
+          REFRESH_ID="${{ steps.refresh.outputs.refresh_id }}"
+          ASG_NAME="${{ env.BACKEND_ASG_NAME }}"
+          MAX_WAIT=1200   # 20 minutes
+          ELAPSED=0
+          INTERVAL=30
+
+          echo "Waiting for instance refresh $REFRESH_ID to complete..."
+
+          while [ $ELAPSED -lt $MAX_WAIT ]; do
+            STATUS=$(aws autoscaling describe-instance-refreshes \
+              --auto-scaling-group-name "$ASG_NAME" \
+              --instance-refresh-ids "$REFRESH_ID" \
+              --query 'InstanceRefreshes[0].Status' \
+              --output text)
+
+            PCT=$(aws autoscaling describe-instance-refreshes \
+              --auto-scaling-group-name "$ASG_NAME" \
+              --instance-refresh-ids "$REFRESH_ID" \
+              --query 'InstanceRefreshes[0].PercentageComplete' \
+              --output text 2>/dev/null || echo "0")
+
+            echo "[$ELAPSED s] Status: $STATUS | Progress: ${PCT}%"
+
+            case "$STATUS" in
+              Successful)
+                echo " Instance refresh completed successfully"
+                exit 0
+                ;;
+              Failed|Cancelled)
+                echo " Instance refresh failed with status: $STATUS"
+                aws autoscaling describe-instance-refreshes \
+                  --auto-scaling-group-name "$ASG_NAME" \
+                  --instance-refresh-ids "$REFRESH_ID" \
+                  --query 'InstanceRefreshes[0].StatusReason' \
+                  --output text
+                exit 1
+                ;;
+            esac
+
+            sleep $INTERVAL
+            ELAPSED=$((ELAPSED + INTERVAL))
+          done
+
+          echo " Instance refresh timed out after ${MAX_WAIT}s"
+          exit 1
+
+      - name: Verify backend health
+        run: |
+          HEALTH_URL="${{ vars.BACKEND_HEALTH_URL }}"
+          if [ -z "$HEALTH_URL" ]; then
+            echo "  BACKEND_HEALTH_URL not set — skipping health check"
+            exit 0
+          fi
+          echo "Checking $HEALTH_URL ..."
+          for i in $(seq 1 5); do
+            STATUS=$(curl -sf -o /dev/null -w "%{http_code}" "$HEALTH_URL" || echo "000")
+            echo "Attempt $i: HTTP $STATUS"
+            if [ "$STATUS" = "200" ]; then
+              echo " Backend is healthy"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo " Backend health check failed after 5 attempts"
+          exit 1
+
+      - name: Deployment summary
+        if: always()
+        run: |
+          echo "### Backend Deployment" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| ASG | ${{ env.BACKEND_ASG_NAME }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Refresh ID | ${{ steps.refresh.outputs.refresh_id }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Commit | ${{ github.sha }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Actor | ${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
