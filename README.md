@@ -1,4 +1,4 @@
-# family-finance-smart-money-management-for-you-family
+# family-finance-smart-money-management-for-your-family
 
 Our application is an AI-powered Family Finance Management System designed to help families manage their complete financial life in one platform. The application allows multiple family members to track daily expenses, manage monthly bills, and monitor investments such as SIPs, LIC, and fixed deposits. It also provides real-time gold and silver price tracking to help users make better investment decisions. The most important feature of the application is the AI financial assistant, which analyzes user spending patterns and provides smart suggestions on how to reduce expenses, increase savings, and plan investments. The dashboard and reports section provide visual insights such as category-wise expenses, monthly spending trends, and financial summaries. This application helps users avoid late bill payments, control overspending, improve savings habits, and make smarter financial decisions, ultimately improving the financial stability and planning of the entire family.
 
