@@ -12,7 +12,7 @@ terraform {
   }
 
   backend "s3" {
-    bucket       = "tf-state-family-finance-381061952788"
+    bucket       = "tf-state-family-finance-399605429130"
     key          = "family-finance/prod/terraform.tfstate"
     region       = "us-east-1"
     use_lockfile = true
