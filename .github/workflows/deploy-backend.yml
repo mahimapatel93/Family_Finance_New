@@ -74,6 +74,7 @@ jobs:
           DYNAMODB_EXPENSES_TABLE:    finance_expenses
           DYNAMODB_BILLS_TABLE:       finance_bills
           DYNAMODB_INVESTMENTS_TABLE: finance_investments
+          GROQ_API_KEY: test-dummy-key-for-ci-only
         run: |
           # Start server in background and check it responds
           node server.js &
