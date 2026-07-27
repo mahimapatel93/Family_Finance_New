@@ -1,1 +1,36 @@
 family-finance-keypair.pem
+# 🔐 Sensitive keys — NEVER commit these
+deploy_key
+deploy_key.pub
+family-finance-keypair.pem
+*.pem
+*.key
+
+# Terraform
+Terraform/.terraform/
+Terraform/*.tfstate
+Terraform/*.tfstate.backup
+Terraform/.terraform.lock.hcl
+Terraform/tfplan
+Terraform/crash.log
+
+# Environment files
+.env
+.env.local
+backend/.env
+frontend/.env
+
+# Dependencies
+node_modules/
+backend/node_modules/
+frontend/node_modules/
+
+# Build output
+frontend/dist/
+frontend/build/
+
+# OS/Editor files
+.DS_Store
+Thumbs.db
+.vscode/
+*.log
