@@ -1,294 +1,214 @@
 # My Deployment Journey: Deploying My Family Finance App
 
-I deployed my **Family Finance App** to AWS using Terraform and GitHub Actions. It was not easy. I faced many real problems on the way. Here I am sharing what went wrong, why it happened, and how I fixed each one.
+I deployed my Family Finance App to AWS with Terraform and GitHub Actions, and it was nowhere close to a smooth first try. Here's a rundown of everything that broke, why, and how I got past it. Sharing this mostly for my future self, but if you're setting up something similar, hopefully it saves you a few hours.
 
-If you are also deploying a project with Terraform + GitHub Actions + AWS, this might help you.
-
-**Tech used:** React (frontend), Express.js (backend), DynamoDB, EC2 servers, Load Balancer, Route53 for domain, GitHub Actions for auto-deploy.
+**Stack:** React frontend, Express backend, DynamoDB, EC2 behind a Load Balancer, Route53 for the domain, GitHub Actions handling deploys.
 
 ---
 
-## 1. S3 Bucket Name Was Already Taken
+## 1. My S3 bucket name was already taken
 
-The first step was to create an S3 bucket for storing Terraform's state file. I ran:
+First step, create a bucket for Terraform's state file:
 
 ```bash
 aws s3api create-bucket --bucket tf-state-family-finance-381061952788 --region us-east-1
 ```
 
-I got this error:
-
 ```
 BucketAlreadyExists: The requested bucket name is not available.
 ```
 
-I was confused because I never made this bucket. Then I learned something important — **S3 bucket names must be unique across the whole world**, not just in your own AWS account. The name in the code had someone else's AWS account number in it.
-
-**How I fixed it:**
+I hadn't created this bucket, so I was stuck for a bit until I realized S3 bucket names are unique across *all* of AWS, not just my account. The name in the repo had someone else's account number baked into it.
 
 ```bash
 aws sts get-caller-identity --query Account --output text
 aws s3api create-bucket --bucket tf-state-family-finance-<my-account-id> --region us-east-1
 ```
 
-Then I updated the bucket name in `main.tf`.
-
-**What I learned:** Never copy someone else's S3 bucket name. It will clash.
+Updated `main.tf` with the new name and moved on. Lesson: never reuse someone else's bucket name, it will always collide.
 
 ---
 
-## 2. Git Bash Was Changing My Commands Without Telling Me
+## 2. Git Bash kept silently rewriting my commands
 
-I was trying to save my SSH key in AWS SSM:
+Trying to save an SSH key to SSM:
 
 ```bash
 aws ssm put-parameter --name "/prod/github/deploy_key" --type SecureString --value "$(cat deploy_key)" --region us-east-1
 ```
 
-Error came:
-
 ```
 ValidationException: Parameter name must be a fully qualified name.
 ```
 
-The problem was Git Bash on Windows. It thinks any word starting with `/` is a file path on my computer, so it was silently changing my command before AWS even saw it.
-
-**Fix:**
+Turns out Git Bash on Windows treats anything starting with `/` as a file path and quietly rewrites it before AWS even sees the command. Took me way too long to figure out. The fix is just prefixing the command:
 
 ```bash
 MSYS_NO_PATHCONV=1 aws ssm put-parameter --name "/prod/github/deploy_key" ...
 ```
 
-**What I learned:** On Windows Git Bash, if your AWS command has a `/` in it (like `/prod/app/key`), add `MSYS_NO_PATHCONV=1` before the command.
+Now it's muscle memory whenever I'm running AWS CLI stuff with `/`-prefixed names on Windows.
 
 ---
 
-## 3. DNS Was Not Working and I Checked the Wrong Thing
+## 3. Wrong DNS zone, wasted an hour
 
-After changing my domain's nameservers to point to AWS, I checked:
-
-```bash
-nslookup -type=NS mahima-patel.shop
-```
-
-It just timed out. I tried Google's DNS:
+After pointing my domain to Route53, I checked propagation and just got a timeout. Switched to Google's DNS directly:
 
 ```bash
 nslookup -type=NS mahima-patel.shop 8.8.8.8
 ```
 
-This gave `SERVFAIL`. This meant something was really wrong, not just slow.
-
-I found the real problem — there were 2 hosted zones in Route53, and I had copied the nameservers from the wrong one.
-
-**Fix:**
+Got `SERVFAIL` — a real error, not just "still propagating." Turned out I had two hosted zones in Route53 and had copied the nameservers from the wrong one.
 
 ```bash
 aws route53 list-hosted-zones --query "HostedZones[].{Name:Name,Id:Id}" --output table
 ```
 
-I found the correct zone, copied the right nameservers, and updated GoDaddy again.
-
-**What I learned:** Always check DNS using a public DNS server like `8.8.8.8`, not your own network's DNS. And if you have more than one hosted zone, double check you are using the right one.
+Grabbed the right ones, updated GoDaddy again, done. Now I always verify DNS against a public resolver instead of trusting my own network, and double check which zone I'm actually reading from if there's more than one.
 
 ---
 
-## 4. GitHub Actions Failed Because a File Was Missing
-
-My backend deploy failed with this error:
+## 4. GitHub Actions choked on a missing lockfile
 
 ```
 Error: Some specified paths were not resolved, unable to cache dependencies.
 ```
 
-The reason was simple — `backend/package-lock.json` did not exist in my repo.
-
-**Fix:**
+`backend/package-lock.json` simply didn't exist in the repo.
 
 ```bash
-cd backend
-npm install
+cd backend && npm install
 git add package-lock.json
 git commit -m "fix: add missing package-lock.json"
 git push origin main
 ```
 
-**What I learned:** Always commit your `package-lock.json` file. GitHub Actions needs it.
+Obvious in hindsight — always commit the lockfile, CI depends on it.
 
 ---
 
-## 5. My Test Step Crashed Because of a Missing API Key
-
-Next error:
+## 5. A crash inside my own "safety check" step
 
 ```
 GroqError: The GROQ_API_KEY environment variable is missing or empty
 Health check returned HTTP 000000
 ```
 
-My workflow has a step that starts the server for a moment, just to test if it works, before real deployment. But I forgot to add `GROQ_API_KEY` in that test step. My code tries to connect to Groq AI as soon as the server starts, so without the key, it crashed immediately.
-
-**Fix:** I added a fake key just for testing:
+My workflow briefly boots the server on the CI runner just to sanity-check it before real deployment. I'd forgotten to give that test step a `GROQ_API_KEY`, and my code initializes the Groq client the instant the server starts — no key, instant crash, no server, no health check.
 
 ```yaml
 GROQ_API_KEY: test-dummy-key-for-ci-only
 ```
 
-The real key is already stored safely in AWS SSM for the actual production server.
-
-**What I learned:** If your app connects to any external service (like an AI API) right when it starts, your test environment also needs a fake value for it, or your test will fail even if your real app is fine.
+The real key comes from SSM in production, this was purely a CI blind spot. Good reminder: any external client your app touches on startup needs a dummy value in test environments too.
 
 ---
 
-## 6. Servers Were Not Becoming "Healthy"
+## 6. Servers stuck "unhealthy" with no obvious reason
 
-This was the hardest one. My GitHub Actions was stuck for 15+ minutes:
-
-```
-[900 s] Status: InProgress | Progress: 100%
-[930 s] Status: InProgress | Progress: 100%
-```
-
-New servers had started, but they were marked "unhealthy" and not working.
-
-I checked the EC2 system log and saw this:
+This one took the longest. GitHub Actions sat there for 15+ minutes with the instance refresh stuck at 100%. New EC2 instances were up but marked unhealthy. The EC2 console's system log only showed:
 
 ```
 Failed to run module scripts-user
 [FAILED] Failed to start cloud-final… Execute cloud user/final scripts.
 ```
 
-This told me the setup script (that installs my app on the server) was failing right at the start. But this log did not show the real reason.
-
-**Fix:** I connected to the server using **AWS Session Manager** (no SSH key needed) and checked the full log:
+Not useful on its own. I connected via Session Manager (no SSH key needed) and pulled the real log:
 
 ```bash
 sudo cat /var/log/cloud-init-output.log
 ```
 
-This showed me the exact error and line where it failed.
-
-**What I learned:** The basic system log is not enough. For the real error, always check `/var/log/cloud-init-output.log` inside the server.
+That's where the actual error was. The basic console log is basically useless for anything your own boot script does — always go straight to `cloud-init-output.log`.
 
 ---
 
-## 7. Browser Showed a Security Warning
+## 7. Browser SSL warning that looked scarier than it was
 
-When I opened my load balancer's link directly in the browser with `https://`, I got:
+Opened the load balancer's own AWS link with `https://` and got:
 
 ```
 Your connection is not private
 net::ERR_CERT_COMMON_NAME_INVALID
 ```
 
-This looked scary but it was normal. My SSL certificate was made for my domain name (`mahima-patel.shop`), not for the load balancer's own AWS link. So the names did not match.
-
-**Fix:** For testing, I used `http://` (without S) on the load balancer's link, or used `curl -k` to ignore this warning. For real use, I used my actual domain, where everything matched fine.
-
-**What I learned:** Don't expect HTTPS to work on a raw AWS link if your certificate is for a different (custom) domain name.
+Normal, actually — my cert was issued for `mahima-patel.shop`, not the load balancer's auto-generated domain, so the names never matched. For quick tests I just used `http://` or `curl -k`. For anything real, I used the actual domain.
 
 ---
 
-## 8. curl Was Giving Me a Redirect Instead of My Answer
+## 8. curl kept giving me a redirect instead of an answer
 
 ```bash
 curl http://<load-balancer-link>/health
 # → 301 Moved Permanently
 ```
 
-My load balancer sends all `http` traffic to `https` automatically (this is good for security). But plain `curl` does not follow this redirect by default.
-
-**Fix:**
+The load balancer forces everything to HTTPS, which is good, but plain `curl` doesn't follow redirects by default.
 
 ```bash
 curl -Lk http://<load-balancer-link>/health
 ```
 
-`-L` means follow the redirect, `-k` means ignore the certificate warning.
+`-L` follows it, `-k` skips the cert mismatch from the last issue.
 
 ---
 
-## 9. The Database "Bug" That Was Not Actually a Bug
+## 9. The "bug" that turned out to not be a bug at all
 
-This is the most important lesson from this whole project, and I got it wrong two times before getting it right.
+This is the one that taught me the most, mainly because I got it wrong twice before getting it right.
 
-I noticed my backend code needed 5 separate database tables (`finance_users`, `finance_families`, `finance_expenses`, `finance_bills`, `finance_investments`), but my Terraform code only created **one** table. I thought this was a big bug. I even suggested two wrong fixes before finding the real answer.
+My backend code expected five separate DynamoDB tables — users, families, expenses, bills, investments — but my Terraform only provisioned one. I flagged it as a critical bug and proposed two different fixes, both wrong, before I actually traced the whole thing end to end.
 
-The real answer was hiding in a file I had not fully checked: `backend/scripts/setupDynamoDB.js`. My server's setup script was **already** running this file every time a new server started:
+The real answer was sitting in `backend/scripts/setupDynamoDB.js`, which my server's boot script was already calling every time an instance started:
 
 ```bash
 node "$APP_DIR/scripts/setupDynamoDB.js"
 ```
 
-This script checks if each of the 5 tables exists, and creates them automatically if they don't. So my app was creating its own database tables by itself the whole time. There was no bug at all.
-
-I checked and confirmed:
+It checks if each table exists and creates whatever's missing. My app had been provisioning its own schema on boot the entire time — there was never a mismatch to fix.
 
 ```bash
 aws dynamodb list-tables --region us-east-1
 ```
 
-All 5 tables were already there.
-
-**What I learned (the biggest lesson):** Before saying something is broken, check the full process from start to end. Don't stop at the first file that looks wrong — there might be another script that already fixes it. And if someone tells you "we did not change this, it was already working" — believe them and look deeper, instead of sticking to your first guess.
+All five were there. Biggest takeaway from this whole project: trace the full process before calling something broken, and if someone tells you "we didn't touch this, it already worked" — believe them and keep digging instead of doubling down on your first theory.
 
 ---
 
-## 10. IAM Role Did Not Have Enough Permission
-
-While Terraform was creating resources, one `apply` failed halfway with:
+## 10. IAM permissions I didn't know I was missing
 
 ```
 Error: creating IAM Role: AccessDenied: User is not authorized to perform: iam:CreateRole
 ```
 
-My AWS user did not have full permission to create IAM roles, which Terraform needs for EC2 instance profiles and Lambda functions.
-
-**Fix:** I checked my IAM user's attached policies in the AWS Console and added the missing permissions (`iam:CreateRole`, `iam:AttachRolePolicy`, `iam:PassRole`). For a personal/learning project, I used a broader policy; for a real production account, I would keep this more restricted.
-
-**What I learned:** Before running `terraform apply` for the first time, check that your AWS user actually has permission to create every type of resource in the plan, not just EC2 and S3.
+My AWS user didn't have permission to create IAM roles, which Terraform needs for EC2 instance profiles and Lambda. Added the missing permissions and re-ran. For a real production account I'd scope this down properly, but for a personal project a broader policy was fine.
 
 ---
 
-## 11. Security Group Was Blocking My Own Health Checks
+## 11. A perfectly running app the load balancer still couldn't reach
 
-Even after my instance was running fine, the Target Group still showed unhealthy. This time the app was actually up (I could see it in `pm2 status`), but the load balancer still could not reach it.
+Instance was healthy, `pm2 status` showed the app running fine, but the Target Group still marked it unhealthy. Turned out the backend's Security Group wasn't allowing inbound traffic from the ALB's Security Group on port 5000. Added the rule, fixed instantly.
 
-**Fix:** I checked the backend's Security Group inbound rules and found port `5000` was not open to traffic coming from the ALB's Security Group. I added an inbound rule allowing the ALB security group on the app's port.
-
-**What I learned:** "App is running" and "Load balancer can reach the app" are two different things. Always check that your Security Group allows traffic from the ALB, not just from your own IP.
+"The app is running" and "the load balancer can reach the app" are not the same thing — worth checking separately.
 
 ---
 
-## 12. ACM Certificate Validation Timed Out
+## 12. Certificate validation that just... sat there
 
-While running `terraform apply`, it got stuck for a long time on this step and then failed:
-
-```
-Error: waiting for ACM Certificate ... to be issued: timeout while waiting for state to become 'ISSUED'
-```
-
-This happened because my domain's nameservers had not fully switched over to Route53 yet, so AWS could not verify that I owned the domain.
-
-**Fix:** I waited for full DNS propagation (confirmed with `nslookup ... 8.8.8.8`) before running `apply` again. Once the nameservers were correctly pointing to AWS, the certificate got issued within a few minutes.
-
-**What I learned:** Never run `terraform apply` for a certificate before your domain's DNS delegation is fully confirmed — it will just sit there and eventually time out.
+`terraform apply` hung for a long time on the ACM certificate step and eventually timed out. The domain's nameservers hadn't fully switched over to Route53 yet, so AWS couldn't verify ownership. Waited for full DNS propagation, confirmed it with a public resolver, ran `apply` again — issued within minutes. Don't bother running certificate-related Terraform steps until DNS delegation is actually confirmed.
 
 ---
 
-## 13. npm ci Failing Locally But Working in GitHub Actions (or vice versa)
+## 13. npm ci vs npm install being stricter than I expected
 
-At one point, my local `npm install` worked fine, but the GitHub Actions workflow failed with dependency version conflicts using `npm ci`.
-
-**Fix:** `npm ci` is stricter than `npm install` — it installs the exact versions in `package-lock.json` and fails if `package.json` and the lockfile are out of sync. I regenerated the lockfile locally with a fresh `npm install`, committed it, and made sure both files matched before pushing again.
-
-**What I learned:** `npm ci` is what most CI pipelines use, and it is much stricter than `npm install`. Always test with `npm ci` locally before pushing, not just `npm install`.
+Local `npm install` worked fine, GitHub Actions failed on `npm ci` with version conflicts. `npm ci` is much stricter — it needs `package.json` and the lockfile to be perfectly in sync, and fails otherwise. Regenerated the lockfile locally, committed it, and started testing with `npm ci` locally too before pushing.
 
 ---
 
-## 14. Protecting My Secret Files Early
+## 14. Locking down secrets before they became a problem
 
-While working, I created some secret files (SSH key, server key) in my project folder. Before anything could go wrong, I added them to `.gitignore`:
+Generated a couple of key files locally (SSH deploy key, EC2 keypair) and added them to `.gitignore` before they had any chance of being committed:
 
 ```gitignore
 deploy_key
@@ -298,45 +218,40 @@ family-finance-keypair.pem
 *.key
 ```
 
-I also checked they were never committed by mistake:
+Double-checked they never made it into git history:
 
 ```bash
 git log --all --full-history -- deploy_key deploy_key.pub family-finance-keypair.pem
 ```
 
-Empty result meant they were safe.
-
-**What I learned:** Add secret files to `.gitignore` before you even create them, not after. Removing secrets from git history later is much harder.
+Empty output, all good. Set this up before generating the keys, not after — cleaning secrets out of git history later is a much bigger headache.
 
 ---
 
-## Final Setup
+## Final setup
 
-| Part | What I Used |
+| Part | What I used |
 |---|---|
-| Infrastructure | Terraform (network, load balancer, servers, database, firewall) |
-| Auto-deploy | GitHub Actions |
-| How code reaches servers | New servers pull latest code automatically when they start |
+| Infrastructure | Terraform — network, load balancer, servers, database, firewall |
+| Deploys | GitHub Actions |
+| Code delivery | New instances pull the latest code automatically on boot |
 | Secrets | AWS SSM Parameter Store |
-| Database | DynamoDB, tables created automatically on first server start |
-| Domain + SSL | Route53 + AWS Certificate, nameservers pointed from GoDaddy |
-| Live site | `https://mahima-patel.shop` |
+| Database | DynamoDB, tables provisioned automatically on first boot |
+| Domain + SSL | Route53 + ACM, nameservers pointed from GoDaddy |
+| Live at | `https://mahima-patel.shop` |
 
 ---
 
-## What I Learned Overall
+## What actually stuck with me
 
-1. Some AWS resource names (like S3 buckets) must be unique across the whole world, not just your account.
-2. Windows Git Bash can silently change your commands — remember `MSYS_NO_PATHCONV`.
-3. Always check DNS using a public DNS server, not your own network.
-4. Test environments need fake values for every external key your app uses, or tests will fail even if the real app works fine.
-5. Basic logs are often not enough — check the deeper/full logs for the real error.
-6. SSL certificates only work for the exact domain they were made for.
-7. Always check the full process before calling something a "bug." Something might already be fixed by another part of the system you have not checked yet.
-8. Protect your secret files before you even create them.
-9. Your AWS user needs permission for every resource type in the plan, not just the obvious ones like EC2 and S3.
-10. A running app and a load-balancer-reachable app are not the same thing — always check Security Group rules between them.
-11. Don't run certificate/domain-related Terraform steps until your DNS delegation is fully confirmed.
-12. Use `npm ci` locally too, not just `npm install`, since that's what most CI pipelines actually run.
+- AWS resource names that need to be globally unique (like S3 buckets) will bite you if you copy them from somewhere else.
+- Windows Git Bash silently mangles `/`-prefixed arguments — `MSYS_NO_PATHCONV=1` is now automatic for me.
+- Always verify DNS against a public resolver, never your own network.
+- Test environments need dummy values for every external service your app touches on startup.
+- Basic logs rarely have the real answer — go straight to the deeper log.
+- SSL certs only work for the exact domain they were issued for.
+- A running app isn't the same as a reachable app — check the network path separately.
+- Before calling something a bug, trace the whole process end to end. Something you haven't looked at yet might already handle it.
+- Protect secret files before you create them, not after.
 
-This project taught me a lot about real-world debugging — much more than any tutorial. If you are stuck on something similar, my biggest advice is: slow down, check the full picture, and always double-check using an independent source (public DNS, real logs, direct AWS commands) instead of trusting the first error message you see.
+This project taught me more about real infrastructure debugging than any course did. If you're stuck on something similar, the short version of my advice is: slow down, verify with an independent source instead of trusting the first error message, and read the whole system before deciding something is broken.
