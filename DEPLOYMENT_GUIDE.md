@@ -245,6 +245,48 @@ aws ssm put-parameter \
 echo "Slack webhook stored in SSM"
 ```
 
+### 1.5 Store All App Secrets in SSM (required — read by the EC2 instances at boot)
+
+These are the parameters `backend.sh` actually fetches every time a backend instance boots. All of them need to exist in SSM **before** you launch any instances, or the boot script will fall back to placeholder/empty values and the app won't work correctly.
+
+```bash
+# GitHub deploy key (already covered in Step 3.3, listed here again for completeness)
+aws ssm put-parameter --name "/prod/github/deploy_key" --type SecureString \
+  --value "$(cat deploy_key)" --region us-east-1
+
+# JWT signing secret — any random string, 32+ characters
+aws ssm put-parameter --name "/prod/app/jwt-secret" --type SecureString \
+  --value "<random 32+ char string>" --region us-east-1
+
+# Groq AI API key — from console.groq.com
+aws ssm put-parameter --name "/prod/app/groq-api-key" --type SecureString \
+  --value "<your groq api key>" --region us-east-1
+
+# News API key — from newsapi.org
+aws ssm put-parameter --name "/prod/app/news-api-key" --type SecureString \
+  --value "<your news api key>" --region us-east-1
+
+# Alpha Vantage key (used for gold/silver/stock market data) — from alphavantage.co
+aws ssm put-parameter --name "/prod/app/alpha-vantage-key" --type SecureString \
+  --value "<your alpha vantage key>" --region us-east-1
+```
+
+Verify all of them exist:
+```bash
+aws ssm get-parameters-by-path --path "/prod" --recursive --region us-east-1 \
+  --query 'Parameters[*].Name' --output table
+```
+Expected to see:
+```
+/prod/github/deploy_key
+/prod/app/jwt-secret
+/prod/app/groq-api-key
+/prod/app/news-api-key
+/prod/app/alpha-vantage-key
+```
+
+> Note: `alpha-vantage-key` has a fallback (`|| echo ""`) in `backend.sh`, so a missing value won't crash the boot — it will just mean the market/stock-price feature doesn't work. The other four are required for the app to function correctly.
+
 ---
 
 ## Step 2 – Domain & DNS (Registrar → Route 53)
@@ -395,6 +437,32 @@ family-finance-keypair.pem
 > **This project actually deploys through GitHub Actions**, not only by running `terraform apply` manually from your laptop. There's a `.github/workflows/terraform.yml` workflow that runs `terraform plan`/`apply` — go to **Actions tab → "Terraform Infrastructure" → Run workflow**, choose `action: plan` first to review, then `action: apply`. The manual CLI steps below are still useful for local testing/debugging, but for the actual deployment, prefer the workflow.
 >
 > Also note: the `terraform.yml` workflow's automatic push-trigger currently watches the lowercase path `terraform/**`, but the real folder in this repo is `Terraform/` (capital T). Since GitHub Actions path filters are case-sensitive, pushing changes into `Terraform/` will **not** auto-trigger the workflow yet — use the manual "Run workflow" button until that path is corrected.
+
+### 4.0 GitHub Secrets & Variables (set these before running any workflow)
+
+Go to **Repo → Settings → Secrets and variables → Actions**.
+
+**Secrets tab** — used by `terraform.yml`:
+```
+AWS_ACCESS_KEY_ID
+AWS_SECRET_ACCESS_KEY
+TF_VAR_DOMAIN_NAME             = mahima-patel.shop
+TF_VAR_SLACK_WEBHOOK_URL       = (can be left empty if not using Slack alerts)
+TF_VAR_KEY_NAME                = family-finance-keypair
+TF_VAR_GITHUB_REPO_FRONTEND    = git@github.com:YOUR_ORG/family-finance.git
+TF_VAR_GITHUB_REPO_BACKEND     = git@github.com:YOUR_ORG/family-finance.git
+```
+
+**Variables tab** — used by `deploy-backend.yml` and `deploy-frontend.yml`:
+```
+AWS_REGION            = us-east-1
+BACKEND_ASG_NAME       = prod-backend-asg
+FRONTEND_ASG_NAME      = prod-frontend-asg
+BACKEND_HEALTH_URL     = http://<external-alb-dns>/health
+FRONTEND_HEALTH_URL    = http://<external-alb-dns>/
+VITE_API_URL           = http://<external-alb-dns>/api
+```
+The `<external-alb-dns>` value only becomes available after the first successful `terraform apply` — check the workflow's Step Summary or run `terraform output -raw external_alb_dns` to get it, then come back and fill in these two Variables.
 
 ### 4.1 Prepare Configuration
 ```bash
