@@ -7,7 +7,7 @@
 1. [Architecture Overview](#1-architecture-overview)
 2. [Prerequisites](#2-prerequisites)
 3. [Step 1 – AWS Account Preparation](#step-1--aws-account-preparation)
-4. [Step 2 – Domain & DNS (GoDaddy → Route 53)](#step-2--domain--dns-godaddy--route-53)
+4. [Step 2 – Domain & DNS (Registrar → Route 53)](#step-2--domain--dns-registrar--route-53)
 5. [Step 3 – GitHub Repo Preparation](#step-3--github-repo-preparation)
 6. [Step 4 – Terraform Deployment](#step-4--terraform-deployment)
 7. [Step 5 – Verify Security Groups](#step-5--verify-security-groups)
@@ -32,7 +32,7 @@
 Internet
     │
     ▼
-GoDaddy (NS records → Route 53)
+Domain Registrar (NS records → Route 53)
     │
     ▼
 Route 53  (A alias → External ALB)
@@ -41,22 +41,22 @@ Route 53  (A alias → External ALB)
 WAF v2 WebACL  (Managed Rules + Rate Limit + Bot Control)
     │
     ▼
-External ALB  ← ACM TLS 1.3 Certificate
+External ALB  ← ACM TLS Certificate
   us-east-1a | us-east-1b | us-east-1c  [public subnets]
     │  port 443 → TG → port 3000
     ▼
 Frontend ASG  [private-frontend subnets]
-  Next.js / React  •  PM2 cluster  •  Node.js 20
+  React (Vite build)  •  PM2  •  Node.js 20  •  runs as OS user "appuser"
     │  HTTP :80 → Internal ALB
     ▼
 Internal ALB  [private-frontend subnets, internal=true]
-    │  port 80 → TG → port 8080
+    │  port 80 → TG → port 5000
     ▼
 Backend ASG  [private-backend subnets]
-  Express API  •  PM2 cluster  •  Node.js 20
-    │  AWS SDK  •  IAM Role  •  VPC Endpoint
+  Express API  •  PM2  •  Node.js 20  •  runs as OS user "appuser"
+    │  AWS SDK  •  IAM Role
     ▼
-DynamoDB  (PAY_PER_REQUEST • 2 GSIs • PITR • Encrypted)
+DynamoDB
     │  Streams
     ▼
 Lambda (stream_logger) ──► CW Logs /aws/dynamodb/prod/streams
@@ -76,6 +76,8 @@ EC2 CloudWatch Agent ──────► CW Logs /aws/ec2/prod/backend
                           Slack  #prod-alerts
 ```
 
+> **Note on DynamoDB:** This project actually uses DynamoDB in two separate ways. The app's real data — users, families, expenses, bills, investments — lives in five tables (`finance_users`, `finance_families`, `finance_expenses`, `finance_bills`, `finance_investments`) that are **not** created by Terraform. They're created automatically by `backend/scripts/setupDynamoDB.js`, which runs as part of the backend's boot script on every instance startup (it checks if each table exists and creates any that are missing). The single Terraform-managed table shown in the diagram above (with Streams enabled, feeding the `stream_logger` Lambda) is separate — it's used for the CloudWatch logging/monitoring pipeline, not for the app's core data. See the updated Step 9 below for how to verify both.
+
 **Subnet Layout (10.0.0.0/16):**
 
 | Subnet | AZ-a | AZ-b | AZ-c |
@@ -89,6 +91,8 @@ EC2 CloudWatch Agent ──────► CW Logs /aws/ec2/prod/backend
 ```
 Internet (0.0.0.0/0) → ALB SG → Frontend SG → Internal LB SG → Backend SG → DynamoDB (VPC Endpoint)
 ```
+
+**Deployment model:** This project deploys through 3 GitHub Actions workflows rather than only manual local `terraform apply` — see the note in Step 4 below.
 
 ---
 
@@ -136,6 +140,11 @@ aws configure
 aws sts get-caller-identity
 ```
 
+> **Windows / Git Bash note:** Git Bash (MSYS2-based) silently rewrites any argument starting with `/` into a Windows-style file path. This breaks AWS CLI commands that take path-like names (SSM parameter names, IAM paths, etc.) — for example `aws ssm put-parameter --name "/prod/..."` can fail with a confusing "must be a fully qualified name" error even though the command is correct. If this happens, prefix the command with:
+> ```bash
+> MSYS_NO_PATHCONV=1 aws ssm put-parameter --name "/prod/github/deploy_key" ...
+> ```
+
 ### Required AWS IAM Permissions
 Attach these to your IAM user before running Terraform:
 - `AmazonVPCFullAccess`
@@ -163,18 +172,25 @@ Attach these to your IAM user before running Terraform:
 ```bash
 aws ec2 delete-key-pair --key-name family-finance-keypair --region us-east-1
 
-rm -f ~/.ssh/family-finance-keypair.pem
+rm -f family-finance-keypair.pem
 
 aws ec2 create-key-pair \
   --key-name family-finance-keypair \
   --region us-east-1 \
   --query 'KeyMaterial' \
-  --output text > ~/.ssh/family-finance-keypair.pem
+  --output text > family-finance-keypair.pem
 
-chmod 400 ~/.ssh/family-finance-keypair.pem
+chmod 400 family-finance-keypair.pem   # Linux/macOS only
+```
+
+Verify it exists:
+```bash
+aws ec2 describe-key-pairs --key-names family-finance-keypair --region us-east-1
 ```
 
 ### 1.2 Create Terraform State Backend
+
+> **S3 bucket names must be globally unique across every AWS account in the world**, not just your own account. Always build the bucket name from your own AWS Account ID rather than reusing one from an example or another deployment.
 
 **S3 bucket for state:**
 ```bash
@@ -202,37 +218,28 @@ aws s3api put-public-access-block \
 echo "State bucket: $BUCKET_NAME"
 ```
 
-<!-- **DynamoDB lock table:**
-```bash
-aws dynamodb create-table \
-  --table-name terraform-lock \
-  --attribute-definitions AttributeName=LockID,AttributeType=S \
-  --key-schema AttributeName=LockID,KeyType=HASH \
-  --billing-mode PAY_PER_REQUEST \
-  --region us-east-1
-
-echo "Lock table created: terraform-lock"
-``` -->
+> **No separate DynamoDB lock table needed.** This project's `main.tf` uses S3-native state locking (`use_lockfile = true`) instead of the older DynamoDB-lock-table pattern, so there's no `terraform-lock` table to create — see the corrected backend block in 1.3 below.
 
 ### 1.3 Enable S3 Backend in main.tf
-Open `main.tf` and uncomment the backend block, substituting your bucket name:
+Open `main.tf` and set the backend block with your bucket name:
 ```hcl
 backend "s3" {
-  bucket         = "tf-state-family-finance-811572529216"   # your account ID
-  key            = "family-finance/prod/terraform.tfstate"
-  region         = "us-east-1"
-  dynamodb_table = "terraform-lock"
-  encrypt        = true
+  bucket       = "tf-state-family-finance-<your-account-id>"
+  key          = "family-finance/prod/terraform.tfstate"
+  region       = "us-east-1"
+  use_lockfile = true
+  encrypt      = true
 }
 ```
 
 ### 1.4 Store Sensitive Values in SSM Parameter Store
+
+> In this project's actual GitHub Actions setup, the Slack webhook URL is passed to Terraform as the `TF_VAR_SLACK_WEBHOOK_URL` GitHub Secret at apply time (not read from SSM by Terraform itself). If you prefer to also keep a copy in SSM for reference/manual use, you can still do so:
 ```bash
-# Store Slack webhook URL securely (read by Terraform at apply time)
 aws ssm put-parameter \
   --name "/prod/slack/webhook-url" \
   --type "SecureString" \
-  --value "slack webhook url" \
+  --value "<your slack webhook url>" \
   --region us-east-1
 
 echo "Slack webhook stored in SSM"
@@ -240,12 +247,12 @@ echo "Slack webhook stored in SSM"
 
 ---
 
-## Step 2 – Domain & DNS (GoDaddy → Route 53)
+## Step 2 – Domain & DNS (Registrar → Route 53)
 
 ### 2.1 Create Route 53 Hosted Zone
 ```bash
 aws route53 create-hosted-zone \
-  --name global-aws.site \
+  --name mahima-patel.shop \
   --caller-reference $(date +%s) \
   --region us-east-1
 
@@ -257,11 +264,13 @@ aws route53 create-hosted-zone \
 #   ns-012.awsdns-34.org.
 ```
 
-Get NS records programmatically:
+Get NS records programmatically — use the **same domain name** as above:
 ```bash
 ZONE_ID=$(aws route53 list-hosted-zones \
-  --query 'HostedZones[?Name==`familyfinance.io.`].Id' \
+  --query "HostedZones[?Name=='mahima-patel.shop.'].Id" \
   --output text | sed 's|/hostedzone/||')
+
+echo "Zone ID: $ZONE_ID"
 
 aws route53 get-hosted-zone \
   --id "$ZONE_ID" \
@@ -269,9 +278,11 @@ aws route53 get-hosted-zone \
   --output table
 ```
 
-### 2.2 Point GoDaddy to Route 53
+> If more than one hosted zone shows up in `list-hosted-zones` (e.g. an unrelated internal AWS zone), double-check you're reading the Zone ID for your actual domain before continuing.
 
-1. Log in to **GoDaddy.com → My Products → Domains**
+### 2.2 Point Your Registrar to Route 53
+
+1. Log in to your domain registrar (e.g. GoDaddy.com → My Products → Domains)
 2. Click **DNS** next to your domain
 3. Scroll to **Nameservers** → Click **Change**
 4. Select **"Enter my own nameservers (advanced)"**
@@ -282,14 +293,16 @@ aws route53 get-hosted-zone \
 
 ### 2.3 Verify DNS Delegation
 ```bash
-# Wait 15-30 minutes after GoDaddy change, then run:
-dig NS global-aws.site +short
+# Wait 15-30 minutes after the registrar change, then run:
+nslookup -type=NS mahima-patel.shop 8.8.8.8
 
 # Must return awsdns records like:
-# ns-123.awsdns-45.com.
-# ns-456.awsdns-67.net.
+# ns-123.awsdns-45.com
+# ns-456.awsdns-67.net
 
-# If still showing GoDaddy nameservers, wait and try again
+# If still showing the registrar's nameservers, wait and try again.
+# Always check against a public DNS server (8.8.8.8) rather than your local
+# network's DNS — local resolvers can time out or give misleading results.
 ```
 
 ---
@@ -298,123 +311,94 @@ dig NS global-aws.site +short
 
 ### 3.1 Add Health Check Endpoints to Your Apps
 
-**Frontend — Next.js** (`pages/api/health.js`):
+**Backend — Express.js** (`backend/server.js`):
 ```javascript
-export default function handler(req, res) {
+app.get('/health', (req, res) => {
   res.status(200).json({
-    status: 'ok',
-    service: 'frontend',
-    timestamp: new Date().toISOString()
-  });
-}
-```
-
-**Backend — Express.js** (`src/routes/health.js`):
-```javascript
-const router = require('express').Router();
-router.get('/api/health', (req, res) => {
-  res.status(200).json({
-    status: 'ok',
-    service: 'backend',
-    timestamp: new Date().toISOString()
+    status: 'healthy',
+    service: 'Family Finance API',
+    version: '1.0.0',
+    environment: process.env.NODE_ENV || 'development'
   });
 });
-module.exports = router;
 ```
+
+**Frontend** exposes its own `/health` route as well, served by the frontend Node process.
 
 These paths are configured in the ALB target group health checks — the instances will show **unhealthy** if these don't return HTTP 200.
 
+> Note: `/health` returns a static response and does not touch DynamoDB. A passing health check confirms the server process is up, not that the database is reachable — keep that in mind when debugging signup/login issues that don't show up as unhealthy targets.
+
 ### 3.2 Verify package.json Scripts
 
-**Frontend:**
+**Frontend (Vite):**
 ```json
 {
   "scripts": {
-    "build": "next build",
-    "start": "next start -p 3000"
+    "build": "vite build",
+    "preview": "vite preview"
   }
 }
 ```
 
-**Backend** — make sure your entry point is `src/index.js`. If it's different (e.g., `app.js`, `server.js`), update `modules/asg/user-data/backend.sh` in the PM2 ecosystem section:
-```bash
-# Find this line in backend.sh and change to match your entry point:
-script: 'src/index.js',
-```
+**Backend** — the entry point is `backend/server.js` (not `src/index.js`). If you ever restructure the backend, update the PM2 start command in `Terraform/modules/asg/user-data/backend.sh` to match your actual entry point.
 
 ### 3.3 For Private Repos — Setup Deploy Key
 
-<!-- Private repo — so we need authentication to clone it. The cleanest approach for EC2 is a GitHub Personal Access Token (PAT) stored in SSM, embedded in the clone URL. This works with HTTPS (no SSH key complexity needed).
-Here's what needs to happen:
-Step 1 — Create a GitHub PAT (do this once):
-
-Go to GitHub → Settings → Developer Settings → Personal Access Tokens → Fine-grained tokens
-Give it read-only access to your repo (Contents: Read)
-Copy the token
-
-Step 2 — Store it in SSM (do this once):
-bashaws ssm put-parameter \
-  --name "/prod/github/pat" \
-  --value "github_pat_YOUR_TOKEN_HERE" \
-  --type "SecureString" \
-  --region us-east-1 -->
-
 ```bash
 # Generate deploy key
-ssh-keygen -t ed25519 -C "aws-ec2-deploy" -f ~/.ssh/deploy-key -N ""
+ssh-keygen -t ed25519 -C "aws-ec2-deploy" -f deploy_key -N ""
 
 # Add public key to GitHub:
 # Go to: github.com/YOUR_ORG/REPO → Settings → Deploy Keys → Add deploy key
-# Paste: cat ~/.ssh/deploy-key.pub
+# Paste: cat deploy_key.pub
 # Check: Allow write access = NO (read-only is fine)
 
-# Store private key in SSM
+# Store private key in SSM — use this exact name everywhere (underscore, not hyphen)
 aws ssm put-parameter \
   --name "/prod/github/deploy_key" \
-  --value "$(cat ~/.ssh/deploy-key)" \
+  --value "$(cat deploy_key)" \
   --type "SecureString" \
   --region us-east-1
 
-#   Store Manually in SSM
-# Go to:
-AWS Console → Systems Manager → Parameter Store → Create Parameter
-Fill like this:
-Field	Value
-Name	/prod/github/deploy_key
-Type	SecureString
-KMS Key	Default (aws/ssm)
-Value	Paste full private key
-Tier	Standard
+# Or store manually in SSM via the console:
+# AWS Console → Systems Manager → Parameter Store → Create Parameter
+# Field       Value
+# Name        /prod/github/deploy_key
+# Type        SecureString
+# KMS Key     Default (aws/ssm)
+# Value       Paste full private key
+# Tier        Standard
+```
 
-# # Update user-data scripts to fetch the key before git clone.
-# # Add these lines to both frontend.sh and backend.sh BEFORE the git clone line:
-cat >> modules/asg/user-data/frontend.sh << 'PATCH'
-# # Fetch GitHub deploy key from SSM
-mkdir -p /root/.ssh
-aws ssm get-parameter \
-  --name "/prod/github/deploy-key" \
-  --with-decryption \
-  --query Parameter.Value \
-  --output text \
-  --region $AWS_REGION > /root/.ssh/id_ed25519
-chmod 600 /root/.ssh/id_ed25519
-ssh-keyscan github.com >> /root/.ssh/known_hosts 2>/dev/null
-PATCH
+> **Important — parameter name consistency:** Make sure the name you store the key under (`/prod/github/deploy_key`, with an underscore) exactly matches the name your `backend.sh` / `frontend.sh` user-data scripts fetch it under. A common mistake is storing it as `deploy_key` but having the fetch script look for `deploy-key` (hyphen) — these are two different SSM parameters and the fetch will fail with `ParameterNotFound` if they don't match exactly.
 
-# Also change GITHUB_REPO in terraform.tfvars to SSH format:
-# github_repo_frontend = "git@github.com:YOUR_ORG/family-finance-frontend.git"
+Also make sure `GITHUB_REPO` in `terraform.tfvars` uses the SSH format so the deploy key can actually be used:
+```hcl
+github_repo_frontend = "git@github.com:YOUR_ORG/family-finance.git"
+github_repo_backend  = "git@github.com:YOUR_ORG/family-finance.git"
+```
+
+Add the key files to `.gitignore` **before** you generate them:
+```gitignore
+deploy_key
+deploy_key.pub
+family-finance-keypair.pem
+*.pem
+*.key
 ```
 
 ---
 
 ## Step 4 – Terraform Deployment
 
+> **This project actually deploys through GitHub Actions**, not only by running `terraform apply` manually from your laptop. There's a `.github/workflows/terraform.yml` workflow that runs `terraform plan`/`apply` — go to **Actions tab → "Terraform Infrastructure" → Run workflow**, choose `action: plan` first to review, then `action: apply`. The manual CLI steps below are still useful for local testing/debugging, but for the actual deployment, prefer the workflow.
+>
+> Also note: the `terraform.yml` workflow's automatic push-trigger currently watches the lowercase path `terraform/**`, but the real folder in this repo is `Terraform/` (capital T). Since GitHub Actions path filters are case-sensitive, pushing changes into `Terraform/` will **not** auto-trigger the workflow yet — use the manual "Run workflow" button until that path is corrected.
+
 ### 4.1 Prepare Configuration
 ```bash
-cd terraform-family-finance
-
-# Copy and edit your variables
-cp terraform.tfvars.example terraform.tfvars
+cd Terraform
 ```
 
 Edit `terraform.tfvars`:
@@ -424,21 +408,21 @@ environment        = "prod"
 vpc_cidr           = "10.0.0.0/16"
 availability_zones = ["us-east-1a", "us-east-1b", "us-east-1c"]
 
-domain_name       = "familyfinance.io"          # Your actual domain
-slack_webhook_url = "https://hooks.slack.com/services/T.../B.../..."
+domain_name       = "mahima-patel.shop"
+slack_webhook_url = ""   # optional — leave blank if not using Slack alerts
 
-frontend_ami           = "ami-0c101f26f147fa7fd"  # AL2023 us-east-1 (verify latest)
-backend_ami            = "ami-0c101f26f147fa7fd"
-frontend_instance_type = "t3.small"
+frontend_ami           = "<latest AL2023 AMI ID>"
+backend_ami            = "<latest AL2023 AMI ID>"
+frontend_instance_type = "t3.medium"
 backend_instance_type  = "t3.medium"
 
-github_repo_frontend = "https://github.com/YOUR_ORG/family-finance-frontend.git"
-github_repo_backend  = "https://github.com/YOUR_ORG/family-finance-backend.git"
+github_repo_frontend = "git@github.com:YOUR_ORG/family-finance.git"
+github_repo_backend  = "git@github.com:YOUR_ORG/family-finance.git"
 
 key_name = "family-finance-keypair"
 ```
 
-**Security:** Keep `terraform.tfvars` out of git:
+**Security:** Keep `terraform.tfvars` out of git if it contains anything sensitive:
 ```bash
 cat >> .gitignore << 'EOF'
 terraform.tfvars
@@ -496,64 +480,35 @@ terraform plan -out=tfplan 2>&1 | tee plan-output.log
 grep -E "will be created|must be replaced|will be destroyed" plan-output.log | head -50
 ```
 
-Expected resource count: ~85-100 resources added.
-
 Key items to confirm in the plan:
 - `aws_vpc.main` — 1 VPC
-- `aws_subnet.*` — 12 subnets (4 tiers × 3 AZs)
-- `aws_nat_gateway.nat[0/1/2]` — 3 NAT Gateways
+- `aws_subnet.*` — subnets across 3 AZs
+- `aws_nat_gateway.nat[...]` — NAT Gateway(s)
 - `aws_security_group.alb/frontend/internal_lb/backend` — 4 SGs
 - `aws_lb.external` + `aws_lb.internal` — 2 ALBs
 - `aws_acm_certificate.main` — 1 wildcard cert
-- `aws_dynamodb_table.main` — 1 table
+- `aws_dynamodb_table.main` — 1 table (the Streams/monitoring table — see the note in Step 1)
 - `aws_autoscaling_group.frontend` + `aws_autoscaling_group.backend` — 2 ASGs
 - `aws_wafv2_web_acl.main` — 1 WAF
 - `aws_cloudwatch_metric_alarm.*` — multiple alarms
 - `aws_lambda_function.slack_notifier` — 1 Lambda
 - `aws_sns_topic.alerts` — 1 SNS topic
 
-### 4.6 Apply in Phases (Recommended)
+### 4.6 Apply
 
-Apply one module at a time to isolate issues:
-
-**Phase 1 – VPC & Security Groups**
-```bash
-terraform apply -target=module.vpc -target=module.security_groups
-# Takes ~3 minutes
-```
-
-**Phase 2 – WAF**
-```bash
-terraform apply -target=module.waf
-# Takes ~2 minutes
-```
-
-**Phase 3 – ACM + ALB** (requires DNS to be delegated first!)
-```bash
-terraform apply -target=module.alb
-# Takes ~10-15 minutes (ACM DNS validation)
-# Watch for: aws_acm_certificate_validation.main: Still creating...
-# This is normal — ACM is waiting for Route 53 DNS validation record to propagate
-```
-
-**Phase 4 – DynamoDB + Monitoring**
-```bash
-terraform apply -target=module.dynamodb -target=module.monitoring
-# Takes ~3 minutes
-```
-
-**Phase 5 – ASG (EC2 instances)**
-```bash
-terraform apply -target=module.asg
-# Takes ~5-8 minutes
-# EC2 instances launch and run user-data scripts
-```
-
-**Phase 6 – Final apply (catches any dependencies)**
+If applying manually (rather than via the GitHub Actions workflow described above), you can apply everything in one pass:
 ```bash
 terraform apply
-# Should show: 0 to add, 0 to change, 0 to destroy
-# If anything remains, it applies now
+```
+
+If you want to isolate issues by applying module-by-module, that also works:
+```bash
+terraform apply -target=module.vpc -target=module.security_groups
+terraform apply -target=module.waf
+terraform apply -target=module.alb        # requires DNS to be delegated first (Step 2)!
+terraform apply -target=module.dynamodb -target=module.monitoring
+terraform apply -target=module.asg
+terraform apply                            # final pass, catches any remaining dependencies
 ```
 
 ### 4.7 Save Outputs
@@ -578,20 +533,6 @@ aws ec2 describe-security-groups \
   --region us-east-1 \
   --query 'SecurityGroups[*].{Name:GroupName,ID:GroupId}' \
   --output table
-```
-
-Expected output:
-```
-----------------------------------------------
-|       DescribeSecurityGroups               |
-+---------------------------+----------------+
-|           Name            |      ID        |
-+---------------------------+----------------+
-|  prod-alb-sg              |  sg-0abc...    |
-|  prod-frontend-sg         |  sg-0def...    |
-|  prod-internal-lb-sg      |  sg-0ghi...    |
-|  prod-backend-sg          |  sg-0jkl...    |
-+---------------------------+----------------+
 ```
 
 ### 5.2 Verify ALB SG — Source Must Be 0.0.0.0/0
@@ -631,7 +572,7 @@ ILB_SG=$(aws ec2 describe-security-groups \
 
 BE_SOURCE=$(aws ec2 describe-security-groups \
   --filters "Name=group-name,Values=prod-backend-sg" \
-  --query 'SecurityGroups[0].IpPermissions[?FromPort==`8080`].UserIdGroupPairs[0].GroupId' \
+  --query 'SecurityGroups[0].IpPermissions[?FromPort==`5000`].UserIdGroupPairs[0].GroupId' \
   --output text --region us-east-1)
 
 echo "Internal LB SG:     $ILB_SG"
@@ -670,20 +611,18 @@ aws wafv2 get-web-acl-for-resource \
 
 ### 6.3 Test WAF Is Blocking Attacks
 ```bash
-ALB_DNS=$(terraform output -raw external_alb_dns)
-
 # SQL injection — must return 403
 HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-  "https://familyfinance.io/?id=1'+OR+'1'%3D'1")
+  "https://mahima-patel.shop/?id=1'+OR+'1'%3D'1")
 echo "SQL injection test:  HTTP $HTTP_CODE  (expected: 403)"
 
 # XSS — must return 403
 HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-  "https://familyfinance.io/?search=%3Cscript%3Ealert(1)%3C/script%3E")
+  "https://mahima-patel.shop/?search=%3Cscript%3Ealert(1)%3C/script%3E")
 echo "XSS test:            HTTP $HTTP_CODE  (expected: 403)"
 
 # Normal request — must pass (200 or 30x)
-HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "https://familyfinance.io/")
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "https://mahima-patel.shop/")
 echo "Normal request:      HTTP $HTTP_CODE  (expected: 200)"
 ```
 
@@ -728,6 +667,8 @@ aws elbv2 describe-load-balancers \
 # Scheme: internal
 ```
 
+> **Testing tip:** The ALB's own auto-generated DNS name (e.g. `prod-external-alb-xxxx.us-east-1.elb.amazonaws.com`) will not match your ACM certificate, since the cert was issued for `mahima-patel.shop`. Browsers will show `ERR_CERT_COMMON_NAME_INVALID` if you open the raw ALB DNS name with `https://` — this is expected. For quick testing use `http://` on the raw ALB name, or `curl -Lk` (follow redirects, ignore cert mismatch). Use your real domain over HTTPS for final verification.
+
 ### 7.4 Check Target Group Health
 ```bash
 # Frontend target group
@@ -756,9 +697,9 @@ aws elbv2 describe-target-health \
 
 # All states should be: healthy
 # Common issue if unhealthy:
-#   - App not listening on expected port (3000 or 8080)
-#   - /health or /api/health endpoint not returning 200
-#   - User data script failed (check /var/log/user-data.log via SSM)
+#   - App not listening on expected port (3000 frontend / 5000 backend)
+#   - /health endpoint not returning 200
+#   - User data script failed — check /var/log/cloud-init-output.log via SSM (see Step 8)
 ```
 
 ---
@@ -780,74 +721,45 @@ aws autoscaling describe-auto-scaling-groups \
   --output table
 ```
 
-### 8.2 View Lifecycle Hooks
+### 8.2 Connect to Instance via SSM (No SSH Needed)
 ```bash
-for ASG in prod-frontend-asg prod-backend-asg; do
-  echo "=== Lifecycle Hooks: $ASG ==="
-  aws autoscaling describe-lifecycle-hooks \
-    --auto-scaling-group-name "$ASG" \
-    --region us-east-1 \
-    --query 'LifecycleHooks[*].{Hook:LifecycleHookName,Transition:LifecycleTransition,Timeout:HeartbeatTimeout}' \
-    --output table
-done
-
-# Expected per ASG:
-# *-scale-in-hook   → autoscaling:EC2_INSTANCE_TERMINATING  (300-600s)
-# *-scale-out-hook  → autoscaling:EC2_INSTANCE_LAUNCHING    (300s)
-```
-
-### 8.3 View Scheduled Scaling Actions
-```bash
-for ASG in prod-frontend-asg prod-backend-asg; do
-  echo "=== Scheduled Actions: $ASG ==="
-  aws autoscaling describe-scheduled-actions \
-    --auto-scaling-group-name "$ASG" \
-    --region us-east-1 \
-    --query 'ScheduledUpdateGroupActions[*].{Action:ScheduledActionName,Recurrence:Recurrence,Min:MinSize,Desired:DesiredCapacity}' \
-    --output table
-done
-```
-
-### 8.4 Connect to Instance via SSM (No SSH Needed)
-```bash
-# Get a frontend instance ID
-FE_INSTANCE=$(aws autoscaling describe-auto-scaling-instances \
+# Get a backend instance ID
+BE_INSTANCE=$(aws autoscaling describe-auto-scaling-instances \
   --region us-east-1 \
-  --query 'AutoScalingInstances[?AutoScalingGroupName==`prod-frontend-asg`].InstanceId' \
+  --query 'AutoScalingInstances[?AutoScalingGroupName==`prod-backend-asg`].InstanceId' \
   --output text | awk '{print $1}')
 
-echo "Connecting to: $FE_INSTANCE"
+echo "Connecting to: $BE_INSTANCE"
 
 # Open SSM session
-aws ssm start-session --target "$FE_INSTANCE" --region us-east-1
+aws ssm start-session --target "$BE_INSTANCE" --region us-east-1
 ```
 
-Once connected, run these checks:
+Once connected, run these checks. **The app runs as a non-root OS user called `appuser`**, so PM2 commands need `sudo -u appuser`, not just `sudo`:
 ```bash
-# Check PM2 processes
-sudo pm2 list
+# Check PM2 processes (must run as appuser, not root)
+sudo -u appuser pm2 status
 
 # Check app logs
-sudo pm2 logs family-finance-frontend --lines 30
+sudo -u appuser pm2 logs --lines 30
 
-# Check app is listening on port 3000
-sudo ss -tlnp | grep 3000
+# Check app is listening on the expected port
+sudo ss -tlnp | grep 5000    # backend
+sudo ss -tlnp | grep 3000    # frontend
 
 # Test health endpoint locally
-curl -s localhost:3000/health | python3 -m json.tool
+curl -s localhost:5000/health
 
 # Check CloudWatch agent
 sudo systemctl status amazon-cloudwatch-agent
 
-# Check user data completed
-tail -5 /var/log/user-data.log
-# Last line should be: === Frontend bootstrap complete ===
-
-# Check environment variables loaded
-cat /opt/family-finance-frontend/.env.production
+# Check the FULL boot script log — this is where the real error shows up
+# if an instance fails to become healthy. The EC2 console's "Get system log"
+# only shows kernel/boot-level output, not what the user-data script itself did.
+sudo cat /var/log/cloud-init-output.log
 ```
 
-### 8.5 Check Scaling Policies Are Active
+### 8.3 Check Scaling Policies Are Active
 ```bash
 aws autoscaling describe-policies \
   --auto-scaling-group-name prod-frontend-asg \
@@ -860,7 +772,31 @@ aws autoscaling describe-policies \
 
 ## Step 9 – Verify DynamoDB
 
-### 9.1 Check Table Status
+As noted in the Architecture Overview, this project uses DynamoDB in two distinct ways — check both.
+
+### 9.1 Verify the App's Actual Data Tables (created automatically at boot)
+
+These are the tables the backend really reads/writes for signup, login, expenses, bills, and investments. They are created by `backend/scripts/setupDynamoDB.js`, run automatically by `backend.sh` on every instance boot (it's idempotent — checks if each table exists before creating):
+
+```bash
+aws dynamodb list-tables --region us-east-1
+```
+
+You should see:
+```
+finance_users
+finance_families
+finance_expenses
+finance_bills
+finance_investments
+```
+
+If any are missing, connect to a backend instance via SSM (Step 8.2) and check `sudo cat /var/log/cloud-init-output.log` for errors during the `setupDynamoDB.js` step, or re-run it manually:
+```bash
+sudo -u appuser node /path/to/backend/scripts/setupDynamoDB.js
+```
+
+### 9.2 Check Table Status (Terraform-managed monitoring table)
 ```bash
 aws dynamodb describe-table \
   --table-name prod-family-finance \
@@ -877,73 +813,21 @@ aws dynamodb describe-table \
 
 # Expected:
 # Status:       ACTIVE
-# BillingMode:  PAY_PER_REQUEST
 # StreamEnabled: true
 # StreamType:   NEW_AND_OLD_IMAGES
-# PITR:         ENABLED
-# Encryption:   ENABLED
 ```
 
-### 9.2 Check GSIs
-```bash
-aws dynamodb describe-table \
-  --table-name prod-family-finance \
-  --region us-east-1 \
-  --query 'Table.GlobalSecondaryIndexes[*].{Name:IndexName,Status:IndexStatus,Keys:KeySchema[*].AttributeName}' \
-  --output table
+### 9.3 Confirm DynamoDB Stream → Lambda → CloudWatch Logging Is Flowing
 
-# Expected:
-# GSI1-UserDate     → ACTIVE
-# GSI2-CategoryDate → ACTIVE
-```
-
-### 9.3 Write and Read a Test Item
+This is the monitoring/audit pipeline, separate from the app's real data. Write a test item to the Terraform-managed table to confirm it's flowing:
 ```bash
-# Write
 aws dynamodb put-item \
   --table-name prod-family-finance \
   --region us-east-1 \
-  --item '{
-    "PK":     {"S": "USER#verify001"},
-    "SK":     {"S": "PROFILE#verify001"},
-    "name":   {"S": "Verification User"},
-    "email":  {"S": "verify@test.com"},
-    "GSI1PK": {"S": "USER#verify001"},
-    "GSI1SK": {"S": "2024-01-01"}
-  }'
-echo "Write: OK"
+  --item '{"PK":{"S":"USER#verify001"},"SK":{"S":"PROFILE#verify001"},"name":{"S":"Verification User"}}'
 
-# Read
-aws dynamodb get-item \
-  --table-name prod-family-finance \
-  --region us-east-1 \
-  --key '{"PK":{"S":"USER#verify001"},"SK":{"S":"PROFILE#verify001"}}' \
-  --query 'Item.{PK:PK.S,SK:SK.S,Name:name.S}' \
-  --output table
-
-# Cleanup
-aws dynamodb delete-item \
-  --table-name prod-family-finance \
-  --region us-east-1 \
-  --key '{"PK":{"S":"USER#verify001"},"SK":{"S":"PROFILE#verify001"}}'
-echo "Cleanup: OK"
-```
-
-### 9.4 Confirm DynamoDB Audit Logs Are Flowing
-After the write test, confirm the stream logger Lambda published to CloudWatch:
-```bash
-# Wait ~30 seconds for Lambda to process the stream event
 sleep 30
 
-aws logs describe-log-streams \
-  --log-group-name /aws/dynamodb/prod/streams \
-  --region us-east-1 \
-  --order-by LastEventTime \
-  --descending \
-  --query 'logStreams[0].{Stream:logStreamName,LastEvent:lastEventTime}' \
-  --output table
-
-# Fetch and display latest events
 STREAM=$(aws logs describe-log-streams \
   --log-group-name /aws/dynamodb/prod/streams \
   --order-by LastEventTime --descending \
@@ -953,8 +837,13 @@ aws logs get-log-events \
   --log-group-name /aws/dynamodb/prod/streams \
   --log-stream-name "$STREAM" \
   --region us-east-1 --limit 5 \
-  --query 'events[*].message' \
-  --output text | python3 -m json.tool 2>/dev/null || echo "(raw output above)"
+  --query 'events[*].message' --output text
+
+# Cleanup
+aws dynamodb delete-item \
+  --table-name prod-family-finance \
+  --region us-east-1 \
+  --key '{"PK":{"S":"USER#verify001"},"SK":{"S":"PROFILE#verify001"}}'
 ```
 
 ---
@@ -973,10 +862,9 @@ Expected log groups:
 ```
 /aws/ec2/prod/backend                    ← backend app + error logs
 /aws/ec2/prod/frontend                   ← frontend app logs
-/aws/dynamodb/prod/streams               ← DynamoDB CDC audit trail
+/aws/dynamodb/prod/streams               ← DynamoDB Streams audit trail
 /aws/lambda/prod-slack-notifier          ← Slack notifier Lambda logs
 /aws/lambda/prod-dynamodb-stream-logger  ← Stream logger Lambda logs
-/aws/vpc/prod/flow-logs                  ← Network traffic audit
 ```
 
 ### 10.2 Check Metric Filters Are Created
@@ -986,11 +874,6 @@ aws logs describe-metric-filters \
   --region us-east-1 \
   --query 'metricFilters[*].{Name:filterName,Pattern:filterPattern,Metric:metricTransformations[0].metricName}' \
   --output table
-
-# Expected 3 filters:
-# prod-backend-error-filter     → [ERROR]
-# prod-backend-5xx-filter       → "statusCode":5
-# prod-backend-exception-filter → (Exception OR TypeError OR ReferenceError)
 ```
 
 ### 10.3 Check All Alarms Status
@@ -1002,25 +885,13 @@ aws cloudwatch describe-alarms \
   --output table
 
 # All should be OK or INSUFFICIENT_DATA (not ALARM) at initial deployment
-# INSUFFICIENT_DATA means no data yet — normal for new deployment
 ```
 
 ### 10.4 Open CloudWatch Dashboard in Browser
 ```bash
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-REGION="us-east-1"
-
-echo "Dashboard URL:"
-echo "https://$REGION.console.aws.amazon.com/cloudwatch/home?region=$REGION#dashboards:name=prod-family-finance"
+echo "https://us-east-1.console.aws.amazon.com/cloudwatch/home?region=us-east-1#dashboards:name=prod-family-finance"
 ```
-
-The dashboard contains 6 panels:
-- Backend Error Rate
-- Backend 5XX Count
-- ALB 5XX Errors + Target Response Time
-- Frontend + Backend CPU Utilization
-- DynamoDB System Errors & Throttles
-- All Alarms Status widget
 
 ---
 
@@ -1035,8 +906,6 @@ aws sns list-subscriptions-by-topic \
   --region us-east-1 \
   --query 'Subscriptions[*].{Protocol:Protocol,Endpoint:Endpoint,Status:SubscriptionArn}' \
   --output table
-
-# Expected: 1 subscription — Protocol=lambda, Status=confirmed (not PendingConfirmation)
 ```
 
 ### 11.2 Verify Lambda Is Active
@@ -1046,10 +915,6 @@ aws lambda get-function \
   --region us-east-1 \
   --query 'Configuration.{State:State,Runtime:Runtime,Handler:Handler}' \
   --output table
-
-# State: Active
-# Runtime: python3.12
-# Handler: slack_notifier.handler
 ```
 
 ### 11.3 Verify Slack Webhook Is Set
@@ -1060,12 +925,8 @@ aws lambda get-function-configuration \
   --query 'Environment.Variables' \
   --output json
 
-# Expected:
-# {
-#   "SLACK_WEBHOOK_URL": "https://hooks.slack.com/services/...",
-#   "ENVIRONMENT": "prod",
-#   "AWS_REGION": "us-east-1"    ← Note: Lambda sets this automatically; may be in env
-# }
+# Note: if you left slack_webhook_url empty in terraform.tfvars / TF_VAR_SLACK_WEBHOOK_URL,
+# this will show an empty value — the Lambda will run fine but won't actually post to Slack.
 ```
 
 ### 11.4 Test Lambda Directly
@@ -1077,41 +938,16 @@ aws lambda invoke \
   --payload '{
     "Records": [{
       "Sns": {
-        "Message": "{\"AlarmName\":\"prod-TEST-alarm\",\"AlarmDescription\":\"Infrastructure verification test\",\"NewStateValue\":\"ALARM\",\"OldStateValue\":\"OK\",\"NewStateReason\":\"Manual test - pipeline working!\",\"StateChangeTime\":\"2024-01-01T12:00:00.000Z\",\"Trigger\":{\"Namespace\":\"FamilyFinance/Test\",\"MetricName\":\"TestMetric\"}}"
+        "Message": "{\"AlarmName\":\"prod-TEST-alarm\",\"AlarmDescription\":\"Infrastructure verification test\",\"NewStateValue\":\"ALARM\",\"OldStateValue\":\"OK\",\"NewStateReason\":\"Manual test\",\"StateChangeTime\":\"2024-01-01T12:00:00.000Z\",\"Trigger\":{\"Namespace\":\"FamilyFinance/Test\",\"MetricName\":\"TestMetric\"}}"
       }
     }]
   }' \
   /tmp/lambda-test-response.json
 
 cat /tmp/lambda-test-response.json
-# Expected: {"statusCode": 200, "body": "OK"}
 ```
 
-Check your **Slack channel** — you should see a red alert card within 10 seconds.
-
-### 11.5 Test Full CW Alarm → SNS → Lambda → Slack Chain
-```bash
-# Trigger the alarm manually
-aws cloudwatch set-alarm-state \
-  --alarm-name prod-backend-high-error-rate \
-  --state-value ALARM \
-  --state-reason "Verification test — checking full alerting pipeline" \
-  --region us-east-1
-
-echo "Alarm triggered. Check Slack in ~30 seconds."
-
-# After confirming Slack received it, reset to OK
-sleep 60
-aws cloudwatch set-alarm-state \
-  --alarm-name prod-backend-high-error-rate \
-  --state-value OK \
-  --state-reason "Verification complete — resetting alarm state" \
-  --region us-east-1
-
-echo "Alarm reset to OK. Check Slack for green recovery message."
-```
-
-### 11.6 View Lambda Execution Logs
+### 11.5 View Lambda Execution Logs
 ```bash
 aws logs tail /aws/lambda/prod-slack-notifier \
   --region us-east-1 \
@@ -1125,65 +961,34 @@ aws logs tail /aws/lambda/prod-slack-notifier \
 
 ### 12.1 DNS Resolution
 ```bash
-# Resolve the domain
-dig familyfinance.io A +short
-# Should return 2-3 IP addresses (ALB nodes across AZs)
-
-# Check www also resolves
-dig www.familyfinance.io A +short
+nslookup mahima-patel.shop 8.8.8.8
 ```
 
 ### 12.2 Full Traffic Flow Test
 ```bash
 echo "=== HTTP → HTTPS Redirect ==="
-curl -sI http://familyfinance.io | grep -E "HTTP/|Location:"
-# Expected: HTTP/1.1 301 | Location: https://familyfinance.io/
+curl -sI http://mahima-patel.shop | grep -E "HTTP/|Location:"
+# Expected: 301 → Location: https://mahima-patel.shop/
 
-echo ""
 echo "=== HTTPS Response ==="
-curl -s -o /dev/null -w "Status: %{http_code} | Time: %{time_total}s | Size: %{size_download} bytes\n" \
-  https://familyfinance.io/
+curl -s -o /dev/null -w "Status: %{http_code} | Time: %{time_total}s\n" https://mahima-patel.shop/
 
-echo ""
-echo "=== Frontend Health ==="
-curl -s https://familyfinance.io/health | python3 -m json.tool
+echo "=== Health Check ==="
+curl -Lk https://mahima-patel.shop/health
 
-echo ""
-echo "=== Backend API Health (via frontend proxy) ==="
-curl -s https://familyfinance.io/api/health | python3 -m json.tool
-
-echo ""
 echo "=== TLS Certificate Details ==="
-echo | openssl s_client -connect familyfinance.io:443 -servername familyfinance.io 2>/dev/null \
+echo | openssl s_client -connect mahima-patel.shop:443 -servername mahima-patel.shop 2>/dev/null \
   | openssl x509 -noout -subject -issuer -enddate
-# issuer should be: Amazon
-# enddate: ~13 months from now (ACM auto-renews)
 ```
 
+Also test real functionality in the browser — sign up, log in, add an expense — since `/health` alone doesn't confirm the database layer works.
+
 ### 12.3 Multi-AZ Verification
-Send multiple requests and verify responses come from different AZs:
 ```bash
 for i in {1..10}; do
   curl -s -o /dev/null -w "Request $i: HTTP %{http_code} | Time: %{time_total}s\n" \
-    https://familyfinance.io/api/health
+    https://mahima-patel.shop/health
 done
-# All should return HTTP 200
-```
-
-### 12.4 Test Scale-Out (Optional)
-```bash
-# Install Apache Bench (quick load test)
-# macOS: brew install httpd
-# Linux: sudo dnf install httpd-tools
-
-ab -n 1000 -c 50 https://familyfinance.io/
-# Watch ASG instance count increase in CloudWatch after CPU crosses 60%
-
-# Monitor ASG
-watch -n 10 'aws autoscaling describe-auto-scaling-groups \
-  --auto-scaling-group-names prod-frontend-asg \
-  --query "AutoScalingGroups[0].{Desired:DesiredCapacity,Running:length(Instances)}" \
-  --output table --region us-east-1'
 ```
 
 ---
@@ -1197,44 +1002,27 @@ watch -n 10 'aws autoscaling describe-auto-scaling-groups \
 3. Create a read-only IAM user for Grafana:
 
 ```bash
-# Create user
 aws iam create-user --user-name grafana-cloudwatch-reader --region us-east-1
 
-# Attach CloudWatch read-only policy
 aws iam attach-user-policy \
   --user-name grafana-cloudwatch-reader \
   --policy-arn arn:aws:iam::aws:policy/CloudWatchReadOnlyAccess
 
-# Create access key
 aws iam create-access-key \
   --user-name grafana-cloudwatch-reader \
   --query 'AccessKey.{ID:AccessKeyId,Secret:SecretAccessKey}' \
   --output table
-# Save these credentials — enter them in Grafana Data Source config
 ```
 
-4. In Grafana Data Source config:
-   - **Authentication Provider:** Access & Secret Key
-   - **Access Key ID / Secret:** from above
-   - **Default Region:** `us-east-1`
-   - Click **Save & Test** → green checkmark expected
+4. In Grafana Data Source config, use the access key/secret, region `us-east-1`, and **Save & Test**.
 
 ### Option B – Self-Hosted Grafana on EC2
-
-Deploy Grafana on a t3.small in a public subnet:
 ```bash
-# Via SSM on a dedicated EC2, or add to user-data:
 sudo dnf install -y grafana
-
-# Edit grafana.ini for your domain
-sudo sed -i 's/;domain = localhost/domain = grafana.familyfinance.io/' \
+sudo sed -i 's/;domain = localhost/domain = grafana.mahima-patel.shop/' \
   /etc/grafana/grafana.ini
-
 sudo systemctl enable grafana-server
 sudo systemctl start grafana-server
-
-# Access at http://INSTANCE_IP:3000
-# Default login: admin / admin (change immediately)
 ```
 
 ### Key Dashboard Panels to Create
@@ -1243,92 +1031,70 @@ sudo systemctl start grafana-server
 |-------------|-------------|-----------|--------|-----------|
 | Frontend CPU % | CloudWatch | FamilyFinance/Frontend | cpu_usage_user | AutoScalingGroupName=prod-frontend-asg |
 | Backend CPU % | CloudWatch | FamilyFinance/Backend | cpu_usage_user | AutoScalingGroupName=prod-backend-asg |
-| Memory Used % | CloudWatch | FamilyFinance/Backend | mem_used_percent | InstanceId |
 | ALB Request Count | CloudWatch | AWS/ApplicationELB | RequestCount | LoadBalancer |
 | ALB 5XX Errors | CloudWatch | AWS/ApplicationELB | HTTPCode_Target_5XX_Count | LoadBalancer |
-| ALB P99 Latency | CloudWatch | AWS/ApplicationELB | TargetResponseTime (p99) | LoadBalancer |
-| Backend Error Logs | CloudWatch | FamilyFinance/Backend | BackendErrorCount | (metric filter) |
-| DynamoDB Errors | CloudWatch | AWS/DynamoDB | SystemErrors | TableName=prod-family-finance |
+| DynamoDB Errors | CloudWatch | AWS/DynamoDB | SystemErrors | TableName |
 | ASG Instance Count | CloudWatch | AWS/AutoScaling | GroupInServiceInstances | AutoScalingGroupName |
-| NAT GW Bytes | CloudWatch | AWS/NATGateway | BytesOutToInternet | NatGatewayId |
 
 ---
 
 ## Security Hardening Checklist
 
-Run through this after deployment:
-
 ### Network Security
 - [ ] No EC2 instances have public IPs (all in private subnets)
-- [ ] Backend EC2s only reachable from Internal LB SG (not from internet at all)
-- [ ] SSH (port 22) only accessible from `10.0.0.0/16` (internal) — no `0.0.0.0/0`
-- [ ] VPC Flow Logs capturing ALL traffic
-- [ ] VPC Gateway Endpoints in use for DynamoDB and S3
-- [ ] VPC Interface Endpoint in use for CloudWatch Logs
+- [ ] Backend EC2s only reachable from Internal LB SG
+- [ ] SSM Session Manager used for access — no open port 22 to the internet
+- [ ] Sensitive local files (`deploy_key`, `*.pem`) are in `.gitignore`
 
 ### TLS / Certificate
-- [ ] HTTP 301 → HTTPS redirect verified
-- [ ] TLS policy `ELBSecurityPolicy-TLS13-1-2-2021-06` (no TLS 1.0/1.1)
-- [ ] ACM certificate auto-renews (no manual renewal needed)
-- [ ] No wildcard exposure — `*.familyfinance.io` cert is only on your ALB
+- [ ] HTTP → HTTPS redirect verified
+- [ ] ACM certificate shows `ISSUED`, auto-renews
 
 ### EC2 Hardening
-- [ ] IMDSv2 enforced on all Launch Templates (`http_tokens = "required"`)
 - [ ] No hardcoded AWS credentials in code or environment files
-- [ ] EBS root volumes encrypted at rest
-- [ ] SSM Session Manager used for access (no open port 22 to internet)
-- [ ] AL2023 AMI regularly updated (set up Patch Manager or re-apply with new AMI)
+- [ ] App secrets pulled from SSM Parameter Store as `SecureString`, never hardcoded
 
 ### WAF Rules Active
-- [ ] AWSManagedRulesCommonRuleSet (OWASP Top 10)
-- [ ] AWSManagedRulesKnownBadInputsRuleSet (log4j, SSRF, etc.)
-- [ ] AWSManagedRulesBotControlRuleSet (scrapers, crawlers)
-- [ ] AWSManagedRulesAmazonIpReputationList (known malicious IPs)
-- [ ] Rate limiting: 2000 req / 5 min per IP
+- [ ] Managed rule groups attached to external ALB
+- [ ] Rate limiting configured
 
 ### DynamoDB
-- [ ] Server-side encryption enabled (AWS managed key)
-- [ ] PITR enabled (restore to any second within 35 days)
-- [ ] Access only via EC2 IAM instance role (no API keys)
-- [ ] DynamoDB traffic via VPC Gateway Endpoint (never traverses internet)
-
-### IAM Least Privilege
-- [ ] EC2 role only has DynamoDB + CloudWatch Logs + SSM + ASG lifecycle
-- [ ] Lambda roles scoped to specific log groups / SNS topics
-- [ ] No `Resource: "*"` except CloudWatch Logs (required by CloudWatch agent)
+- [ ] App tables (`finance_*`) confirmed present via `aws dynamodb list-tables`
+- [ ] Access only via EC2 IAM instance role
 
 ### Monitoring & Alerting
-- [ ] All 8 CloudWatch alarms tested (set to ALARM manually → Slack fired)
-- [ ] DynamoDB stream logs flowing to CloudWatch
-- [ ] VPC Flow Logs active and searchable in CloudWatch Logs Insights
-- [ ] ALB access logs being written to S3
+- [ ] CloudWatch alarms tested
+- [ ] Slack webhook set (or intentionally left blank if not used)
+
+### Repo Hygiene
+- [ ] Repo kept private except when briefly needed for review/debugging
+- [ ] Confirmed sensitive files never made it into git history:
+  ```bash
+  git log --all --full-history -- deploy_key deploy_key.pub family-finance-keypair.pem
+  ```
 
 ---
 
 ## Cost Estimation
 
-Approximate monthly cost (us-east-1, prod workload):
+Approximate monthly cost (us-east-1, minimum capacity):
 
 | Resource | Qty | Est. Monthly |
 |----------|-----|-------------|
-| t3.small EC2 (frontend, min 2) | 2 | $30 |
-| t3.medium EC2 (backend, min 2) | 2 | $60 |
-| NAT Gateway (3 AZs) | 3 | $97 |
+| t3.medium EC2 (frontend) | 2 | ~$60 |
+| t3.medium EC2 (backend) | 2 | ~$60 |
+| NAT Gateway(s) | 1–3 | $32–97 |
 | External ALB | 1 | $20 |
 | Internal ALB | 1 | $18 |
-| DynamoDB on-demand | 1 | $5–50 |
+| DynamoDB on-demand (6 tables total) | — | $5–50 |
 | WAF WebACL + rules | 1 | $10 |
-| CloudWatch Logs (ingestion + storage) | — | $10–25 |
+| CloudWatch Logs | — | $10–25 |
 | Lambda invocations | — | $1 |
 | Route 53 Hosted Zone | 1 | $1 |
 | ACM Certificate | 1 | Free |
-| S3 (ALB access logs) | — | $1 |
-| **Total estimate** | | **$250–310/mo** |
+| **Total estimate** | | **~$220–310/mo** |
 
-**Top cost reduction levers:**
-1. NAT Gateways are the biggest cost ($97/mo). In staging, use a single shared NAT GW
-2. EC2 Savings Plans save ~30-40% on compute
-3. Scheduled scale-down already configured (nights + weekends)
+**Top cost reduction lever:** NAT Gateways are usually the biggest cost. Using a single shared NAT Gateway instead of one per AZ significantly reduces this, at the cost of losing per-AZ NAT redundancy.
 
 ---
 
@@ -1337,28 +1103,25 @@ Approximate monthly cost (us-east-1, prod workload):
 ### Instance Shows Unhealthy in Target Group
 
 ```bash
-# Step 1: Find the instance and connect via SSM
 INSTANCE=$(aws autoscaling describe-auto-scaling-instances \
-  --query 'AutoScalingInstances[?AutoScalingGroupName==`prod-frontend-asg`].InstanceId' \
+  --query 'AutoScalingInstances[?AutoScalingGroupName==`prod-backend-asg`].InstanceId' \
   --output text --region us-east-1 | awk '{print $1}')
 
 aws ssm start-session --target "$INSTANCE" --region us-east-1
 
-# Step 2: Inside the session, check:
-sudo pm2 list                              # Is PM2 running?
-sudo pm2 logs --lines 50                   # Any startup errors?
-sudo ss -tlnp | grep 3000                  # Is port 3000 open?
-curl -v localhost:3000/health              # Does health check pass?
-tail -50 /var/log/user-data.log           # Did bootstrap complete?
-sudo systemctl status amazon-cloudwatch-agent  # Is CW agent running?
+# Inside the session:
+sudo -u appuser pm2 status                 # Is PM2 running? (must be appuser, not root)
+sudo -u appuser pm2 logs --lines 50        # Any startup errors?
+sudo ss -tlnp | grep 5000                  # Is the port open?
+curl -v localhost:5000/health              # Does health check pass locally?
+sudo cat /var/log/cloud-init-output.log    # Full boot log — the real place to find failures
 ```
 
 ### ACM Certificate Stuck in PENDING_VALIDATION
 
 ```bash
-# Check DNS validation records exist in Route 53
 ZONE_ID=$(aws route53 list-hosted-zones \
-  --query 'HostedZones[?Name==`familyfinance.io.`].Id' \
+  --query "HostedZones[?Name=='mahima-patel.shop.'].Id" \
   --output text | sed 's|/hostedzone/||')
 
 aws route53 list-resource-record-sets \
@@ -1366,62 +1129,45 @@ aws route53 list-resource-record-sets \
   --query 'ResourceRecordSets[?Type==`CNAME`].{Name:Name,Value:ResourceRecords[0].Value}' \
   --output table
 
-# Verify GoDaddy is delegated to Route 53
-dig NS familyfinance.io
-# Must show awsdns-XX.com records
-# If still showing GoDaddy NS: the delegation hasn't propagated yet. Wait 30-60 min.
+# Verify DNS delegation from a public resolver
+nslookup -type=NS mahima-patel.shop 8.8.8.8
+# If still showing the registrar's nameservers: delegation hasn't propagated yet. Wait 30-60 min.
 ```
 
 ### Backend Logs Not in CloudWatch
 
 ```bash
-# Connect to backend instance via SSM and check:
 sudo systemctl status amazon-cloudwatch-agent
 cat /opt/aws/amazon-cloudwatch-agent/logs/amazon-cloudwatch-agent.log | tail -20
-
-# Common fix: IAM role missing CloudWatch Logs permissions
-INSTANCE_ROLE=$(aws iam list-instance-profiles \
-  --query 'InstanceProfiles[?contains(InstanceProfileName, `prod-ec2`)].Roles[0].RoleName' \
-  --output text --region us-east-1)
-
-aws iam simulate-principal-policy \
-  --policy-source-arn "arn:aws:iam::$(aws sts get-caller-identity --query Account --output text):role/$INSTANCE_ROLE" \
-  --action-names logs:PutLogEvents \
-  --resource-arns "*" \
-  --query 'EvaluationResults[0].EvalDecision'
-# Must return: allowed
 ```
 
 ### Slack Alerts Not Arriving
 
 ```bash
-# 1. Check Lambda environment variables are set
 aws lambda get-function-configuration \
   --function-name prod-slack-notifier --region us-east-1 \
   --query 'Environment.Variables'
+# If SLACK_WEBHOOK_URL is empty, that's expected if you left it blank in tfvars —
+# set TF_VAR_SLACK_WEBHOOK_URL and re-apply if you want alerts.
 
-# 2. Test Lambda directly with a test payload
-aws lambda invoke \
-  --function-name prod-slack-notifier \
-  --region us-east-1 \
-  --cli-binary-format raw-in-base64-out \
-  --payload '{"Records":[{"Sns":{"Message":"{\"AlarmName\":\"test\",\"NewStateValue\":\"ALARM\",\"OldStateValue\":\"OK\",\"NewStateReason\":\"test\",\"StateChangeTime\":\"2024-01-01T00:00:00Z\",\"Trigger\":{\"Namespace\":\"Test\",\"MetricName\":\"test\"}}"}}]}' \
-  /tmp/out.json && cat /tmp/out.json
-
-# 3. Tail Lambda execution logs
 aws logs tail /aws/lambda/prod-slack-notifier --region us-east-1 --since 5m
-
-# 4. Confirm SNS subscription is confirmed (not PendingConfirmation)
-aws sns list-subscriptions-by-topic \
-  --topic-arn "$(terraform output -raw sns_topic_arn)" \
-  --query 'Subscriptions[*].{Protocol:Protocol,Status:SubscriptionArn}' \
-  --output table
 ```
+
+### GitHub Actions: `package-lock.json` Cache Error
+```
+Error: Some specified paths were not resolved, unable to cache dependencies.
+```
+This means `backend/package-lock.json` (or the frontend equivalent) is missing from the repo. Run `npm install` locally in that folder and commit the generated lockfile.
+
+### GitHub Actions: CI Dry-Run Health Check Crashes on a Missing Key
+If the backend's CI dry-run step fails with something like `GroqError: ... environment variable is missing`, the workflow's test `env:` block needs a dummy value for that key (e.g. `GROQ_API_KEY: test-dummy-key-for-ci-only`). Production still pulls the real key from SSM — this only affects the CI test step.
+
+### SSM Commands Fail with "must be a fully qualified name" (Windows / Git Bash)
+This is the Git Bash path-conversion issue from the Prerequisites section — prefix the command with `MSYS_NO_PATHCONV=1`.
 
 ### Terraform Apply Fails on Module Dependency
 
 ```bash
-# If you get a dependency error, apply modules in order:
 terraform apply -target=module.vpc
 terraform apply -target=module.security_groups
 terraform apply -target=module.waf
@@ -1436,23 +1182,20 @@ terraform apply     # final pass
 
 ## Rollback Procedures
 
-### Roll Back a Single Module (e.g., after bad WAF rule)
+### Roll Back a Single Module (e.g., after a bad WAF rule)
 ```bash
-# Revert specific module to previous state
-git checkout HEAD~1 -- modules/waf/
+git checkout HEAD~1 -- Terraform/modules/waf/
 terraform apply -target=module.waf
 ```
 
 ### Roll Back EC2 Instances (Instance Refresh)
 ```bash
-# Trigger rolling refresh of frontend instances
 aws autoscaling start-instance-refresh \
   --auto-scaling-group-name prod-frontend-asg \
   --strategy Rolling \
   --preferences '{"MinHealthyPercentage":50,"InstanceWarmup":300}' \
   --region us-east-1
 
-# Monitor progress
 aws autoscaling describe-instance-refreshes \
   --auto-scaling-group-name prod-frontend-asg \
   --region us-east-1 \
@@ -1460,40 +1203,41 @@ aws autoscaling describe-instance-refreshes \
   --output table
 ```
 
+### Roll Back a Code Deploy (re-trigger via Git)
+```bash
+git revert HEAD
+git push origin main
+# Re-triggers the relevant GitHub Actions deploy workflow with the reverted code
+```
+
 ### Restore DynamoDB to Point-in-Time
 ```bash
-# Restore to 1 hour ago
 RESTORE_TIME=$(date -d '-1 hour' -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || \
                date -u -v-1H +%Y-%m-%dT%H:%M:%SZ)
 
+# For the app data tables:
 aws dynamodb restore-table-to-point-in-time \
-  --source-table-name prod-family-finance \
-  --target-table-name prod-family-finance-restored \
+  --source-table-name finance_users \
+  --target-table-name finance_users-restored \
   --restore-date-time "$RESTORE_TIME" \
   --region us-east-1
-
-echo "Restore started. Monitor:"
-echo "aws dynamodb describe-table --table-name prod-family-finance-restored --query 'Table.TableStatus'"
 ```
+(Only works if Point-in-Time Recovery is enabled on the table.)
 
 ### Full Infrastructure Destroy
 ```bash
-# WARNING: Destroys all infrastructure including DynamoDB data
-# Backup DynamoDB first if needed
-
-# Create backup
+# WARNING: Destroys all infrastructure. Back up DynamoDB first if needed.
 aws dynamodb create-backup \
   --table-name prod-family-finance \
   --backup-name "pre-destroy-backup-$(date +%Y%m%d)" \
   --region us-east-1
 
-# Destroy all
 terraform destroy
-# Type 'yes' when prompted
+# Or trigger via Actions tab → "Terraform Infrastructure" → Run workflow → action: destroy
 ```
 
 ---
 
-*Infrastructure managed by Terraform | AWS us-east-1 | Multi-AZ HA*
-*For Grafana dashboards, use CloudWatch as data source with read-only IAM credentials*
-*Estimated cost: $250–310/month at minimum capacity*
+*Infrastructure managed by Terraform, deployed via GitHub Actions | AWS us-east-1 | Multi-AZ HA*
+*Live domain: mahima-patel.shop*
+*Estimated cost: ~$220–310/month at minimum capacity*
