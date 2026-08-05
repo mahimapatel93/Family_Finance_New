@@ -89,7 +89,6 @@ jobs:
             -var="key_name=${{ secrets.TF_VAR_KEY_NAME }}" \
             -var="github_repo_frontend=${{ secrets.TF_VAR_GITHUB_REPO_FRONTEND }}" \
             -var="github_repo_backend=${{ secrets.TF_VAR_GITHUB_REPO_BACKEND }}"
-        continue-on-error: true
 
       - name: Upload Terraform plan
         uses: actions/upload-artifact@v4
