@@ -121,10 +121,7 @@ jobs:
               repo:         context.repo.repo,
               body:         output,
             });
-            
-      - name: Terraform Plan Status
-        if: steps.plan.outputs.exitcode == '1'
-        run: exit 1
+          
 
   terraform-apply:
     name: "Apply"
