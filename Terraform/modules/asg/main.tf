@@ -55,7 +55,7 @@ resource "aws_iam_role_policy" "ec2_custom" {
         Sid    = "ASGLifecycle"
         Effect = "Allow"
         Action = ["autoscaling:CompleteLifecycleAction",
-                  "autoscaling:DescribeAutoScalingInstances"]
+        "autoscaling:DescribeAutoScalingInstances"]
         Resource = "*"
       },
       {

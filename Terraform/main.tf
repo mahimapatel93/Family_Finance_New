@@ -76,7 +76,7 @@ module "monitoring" {
   dynamodb_table_name = module.dynamodb.table_name
   aws_region          = var.aws_region
   account_id          = data.aws_caller_identity.current.account_id
-  external_alb_arn    = module.alb.external_alb_arn   # NEW — fixes ALB alarm dimensions
+  external_alb_arn    = module.alb.external_alb_arn # NEW — fixes ALB alarm dimensions
 }
 
 module "asg" {
@@ -89,25 +89,25 @@ module "asg" {
   frontend_subnet_ids = module.vpc.private_frontend_ids
   backend_subnet_ids  = module.vpc.private_backend_ids
 
-  frontend_sg_id         = module.security_groups.frontend_sg_id
-  backend_sg_id          = module.security_groups.backend_sg_id
-  frontend_tg_arn        = module.alb.frontend_tg_arn
-  backend_tg_arn         = module.alb.backend_tg_arn
-  frontend_ami           = var.frontend_ami
-  backend_ami            = var.backend_ami
-  frontend_instance_type = var.frontend_instance_type
-  backend_instance_type  = var.backend_instance_type
-  github_repo_frontend   = var.github_repo_frontend
-  github_repo_backend    = var.github_repo_backend
-  dynamodb_table_name    = module.dynamodb.table_name
-  dynamodb_table_arn     = module.dynamodb.table_arn
-  aws_region             = var.aws_region
+  frontend_sg_id          = module.security_groups.frontend_sg_id
+  backend_sg_id           = module.security_groups.backend_sg_id
+  frontend_tg_arn         = module.alb.frontend_tg_arn
+  backend_tg_arn          = module.alb.backend_tg_arn
+  frontend_ami            = var.frontend_ami
+  backend_ami             = var.backend_ami
+  frontend_instance_type  = var.frontend_instance_type
+  backend_instance_type   = var.backend_instance_type
+  github_repo_frontend    = var.github_repo_frontend
+  github_repo_backend     = var.github_repo_backend
+  dynamodb_table_name     = module.dynamodb.table_name
+  dynamodb_table_arn      = module.dynamodb.table_arn
+  aws_region              = var.aws_region
   backend_log_group_name  = module.monitoring.backend_log_group_name
   frontend_log_group_name = module.monitoring.frontend_log_group_name
-  key_name               = var.key_name
-  internal_lb_dns        = module.alb.internal_lb_dns
-  domain_name            = var.domain_name
-  external_alb_arn       = module.alb.external_alb_arn
+  key_name                = var.key_name
+  internal_lb_dns         = module.alb.internal_lb_dns
+  domain_name             = var.domain_name
+  external_alb_arn        = module.alb.external_alb_arn
 }
 
 data "aws_caller_identity" "current" {}

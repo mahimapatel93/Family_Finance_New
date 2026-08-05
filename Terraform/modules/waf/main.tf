@@ -222,7 +222,7 @@ resource "aws_wafv2_ip_set" "blocked_ips" {
   description        = "Manually blocked IP addresses"
   scope              = "REGIONAL"
   ip_address_version = "IPV4"
-  addresses          = []   # Add CIDRs here: ["1.2.3.4/32"]
+  addresses          = [] # Add CIDRs here: ["1.2.3.4/32"]
 
   tags = {
     Name = "${var.environment}-blocked-ips"

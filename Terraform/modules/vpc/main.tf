@@ -29,7 +29,7 @@ resource "aws_internet_gateway" "igw" {
 resource "aws_subnet" "public" {
   count                   = length(var.azs)
   vpc_id                  = aws_vpc.main.id
-  cidr_block              = cidrsubnet(var.vpc_cidr, 8, count.index)       # 10.0.0/24, 10.0.1/24, 10.0.2/24
+  cidr_block              = cidrsubnet(var.vpc_cidr, 8, count.index) # 10.0.0/24, 10.0.1/24, 10.0.2/24
   availability_zone       = var.azs[count.index]
   map_public_ip_on_launch = true
 
@@ -42,7 +42,7 @@ resource "aws_subnet" "public" {
 resource "aws_subnet" "private_frontend" {
   count             = length(var.azs)
   vpc_id            = aws_vpc.main.id
-  cidr_block        = cidrsubnet(var.vpc_cidr, 8, count.index + 10)        # 10.0.10/24 …
+  cidr_block        = cidrsubnet(var.vpc_cidr, 8, count.index + 10) # 10.0.10/24 …
   availability_zone = var.azs[count.index]
 
   tags = { Name = "${var.environment}-private-frontend-${var.azs[count.index]}" }
@@ -54,7 +54,7 @@ resource "aws_subnet" "private_frontend" {
 resource "aws_subnet" "private_backend" {
   count             = length(var.azs)
   vpc_id            = aws_vpc.main.id
-  cidr_block        = cidrsubnet(var.vpc_cidr, 8, count.index + 20)        # 10.0.20/24 …
+  cidr_block        = cidrsubnet(var.vpc_cidr, 8, count.index + 20) # 10.0.20/24 …
   availability_zone = var.azs[count.index]
 
   tags = { Name = "${var.environment}-private-backend-${var.azs[count.index]}" }
@@ -66,7 +66,7 @@ resource "aws_subnet" "private_backend" {
 resource "aws_subnet" "private_data" {
   count             = length(var.azs)
   vpc_id            = aws_vpc.main.id
-  cidr_block        = cidrsubnet(var.vpc_cidr, 8, count.index + 30)        # 10.0.30/24 …
+  cidr_block        = cidrsubnet(var.vpc_cidr, 8, count.index + 30) # 10.0.30/24 …
   availability_zone = var.azs[count.index]
 
   tags = { Name = "${var.environment}-private-data-${var.azs[count.index]}" }
@@ -86,7 +86,7 @@ resource "aws_nat_gateway" "nat" {
   allocation_id = aws_eip.nat[count.index].id
   subnet_id     = aws_subnet.public[count.index].id
 
-  tags = { Name = "${var.environment}-nat-${var.azs[count.index]}" }
+  tags       = { Name = "${var.environment}-nat-${var.azs[count.index]}" }
   depends_on = [aws_internet_gateway.igw]
 }
 

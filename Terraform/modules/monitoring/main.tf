@@ -289,7 +289,7 @@ resource "aws_cloudwatch_log_metric_filter" "frontend_errors" {
 # We extract this from the full ARN using regex replace.
 ###############################################################################
 locals {
-  alarm_actions  = [aws_sns_topic.alerts.arn]
+  alarm_actions = [aws_sns_topic.alerts.arn]
 
   # Extract "app/NAME/ID" suffix from the full ALB ARN
   # Full ARN: arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/app/prod-external-alb/abc123
@@ -496,8 +496,8 @@ resource "aws_cloudwatch_dashboard" "main" {
         width  = 12
         height = 6
         properties = {
-          title   = "Backend Error Rates"
-          period  = 300
+          title  = "Backend Error Rates"
+          period = 300
           metrics = [
             ["FamilyFinance/Backend", "BackendErrorCount"],
             ["FamilyFinance/Backend", "Backend5xxCount"],
@@ -515,10 +515,10 @@ resource "aws_cloudwatch_dashboard" "main" {
         width  = 12
         height = 6
         properties = {
-          title   = "ALB Latency & 5xx"
-          period  = 300
+          title  = "ALB Latency & 5xx"
+          period = 300
           metrics = [
-            ["AWS/ApplicationELB", "TargetResponseTime",       "LoadBalancer", local.alb_arn_suffix, { stat = "Average" }],
+            ["AWS/ApplicationELB", "TargetResponseTime", "LoadBalancer", local.alb_arn_suffix, { stat = "Average" }],
             ["AWS/ApplicationELB", "HTTPCode_Target_5XX_Count", "LoadBalancer", local.alb_arn_suffix, { stat = "Sum" }],
           ]
           view   = "timeSeries"
@@ -532,10 +532,10 @@ resource "aws_cloudwatch_dashboard" "main" {
         width  = 12
         height = 6
         properties = {
-          title   = "Backend CPU & Memory"
-          period  = 300
+          title  = "Backend CPU & Memory"
+          period = 300
           metrics = [
-            ["FamilyFinance/Backend", "cpu_usage_user",  { stat = "Average" }],
+            ["FamilyFinance/Backend", "cpu_usage_user", { stat = "Average" }],
             ["FamilyFinance/Backend", "mem_used_percent", { stat = "Average" }],
           ]
           view   = "timeSeries"
@@ -549,11 +549,11 @@ resource "aws_cloudwatch_dashboard" "main" {
         width  = 12
         height = 6
         properties = {
-          title   = "DynamoDB Errors & Throttles"
-          period  = 300
+          title  = "DynamoDB Errors & Throttles"
+          period = 300
           metrics = [
-            ["AWS/DynamoDB", "SystemErrors",         "TableName", var.dynamodb_table_name],
-            ["AWS/DynamoDB", "ThrottledRequests",    "TableName", var.dynamodb_table_name],
+            ["AWS/DynamoDB", "SystemErrors", "TableName", var.dynamodb_table_name],
+            ["AWS/DynamoDB", "ThrottledRequests", "TableName", var.dynamodb_table_name],
             ["FamilyFinance/Backend", "DynamoDBErrorCount"],
           ]
           view   = "timeSeries"
@@ -568,7 +568,7 @@ resource "aws_cloudwatch_dashboard" "main" {
         width  = 24
         height = 6
         properties = {
-          title  = "All Alarms Status"
+          title = "All Alarms Status"
           alarms = [
             "arn:aws:cloudwatch:${var.aws_region}:${var.account_id}:alarm:${var.environment}-backend-high-error-rate",
             "arn:aws:cloudwatch:${var.aws_region}:${var.account_id}:alarm:${var.environment}-backend-5xx-high",
