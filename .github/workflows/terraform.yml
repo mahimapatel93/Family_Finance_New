@@ -163,6 +163,11 @@ jobs:
         with:
           name: tfplan
           path: ${{ env.TF_WORKING_DIR }}
+          
+      - name: Check Terraform plan file
+        run: |
+          ls -lh tfplan
+          terraform show -no-color tfplan
 
       - name: Terraform Apply
         run: terraform apply -auto-approve -no-color tfplan
