@@ -3,13 +3,13 @@ on:
   push:
     branches: [main]
     paths:
-      - "terraform/**"
+      - "Terraform/**"
       - ".github/workflows/terraform.yml"
 
   pull_request:
     branches: [main]
     paths:
-      - "terraform/**"
+      - "Terraform/**"
 
   workflow_dispatch:
     inputs:
