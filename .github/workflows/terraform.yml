@@ -3,13 +3,13 @@ on:
   push:
     branches: [main]
     paths:
-      - "Terraform/**"
+      - "terraform/**"
       - ".github/workflows/terraform.yml"
 
   pull_request:
     branches: [main]
     paths:
-      - "Terraform/**"
+      - "terraform/**"
 
   workflow_dispatch:
     inputs:
@@ -79,6 +79,7 @@ jobs:
         run: |
           terraform plan \
             -no-color \
+            -detailed-exitcode \
             -out=tfplan \
             -var="aws_region=${{ env.AWS_REGION }}" \
             -var="environment=${{ github.event.inputs.environment || 'prod' }}" \
@@ -87,7 +88,8 @@ jobs:
             -var="key_name=${{ secrets.TF_VAR_KEY_NAME }}" \
             -var="github_repo_frontend=${{ secrets.TF_VAR_GITHUB_REPO_FRONTEND }}" \
             -var="github_repo_backend=${{ secrets.TF_VAR_GITHUB_REPO_BACKEND }}"
-
+        continue-on-error: true
+        
       - name: Upload Terraform plan
         uses: actions/upload-artifact@v4
         with:
@@ -121,8 +123,10 @@ jobs:
               repo:         context.repo.repo,
               body:         output,
             });
-
-
+            
+      - name: Terraform Plan Status
+        if: steps.plan.outputs.exitcode == '1'
+        run: exit 1
 
   terraform-apply:
     name: "Apply"
@@ -163,11 +167,6 @@ jobs:
         with:
           name: tfplan
           path: ${{ env.TF_WORKING_DIR }}
-          
-      - name: Check Terraform plan file
-        run: |
-          ls -lh tfplan
-          terraform show -no-color tfplan
 
       - name: Terraform Apply
         run: terraform apply -auto-approve -no-color tfplan
