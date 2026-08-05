@@ -63,7 +63,6 @@ jobs:
       - name: Terraform Format Check
         id: fmt
         run: terraform fmt -check -recursive
-        continue-on-error: true
 
       - name: Terraform Init
         id: init
@@ -80,7 +79,6 @@ jobs:
         run: |
           terraform plan \
             -no-color \
-            -detailed-exitcode \
             -out=tfplan \
             -var="aws_region=${{ env.AWS_REGION }}" \
             -var="environment=${{ github.event.inputs.environment || 'prod' }}" \
@@ -124,9 +122,6 @@ jobs:
               body:         output,
             });
 
-            - name: Terraform Plan Status
-            if: steps.plan.outcome == 'failure'
-            run: exit 1
 
 
   terraform-apply:
