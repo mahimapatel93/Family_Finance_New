@@ -1,80 +1,143 @@
 # Docker Deployment Guide
 
-This document describes how the **Family Finance** application is containerized and deployed to a production EC2 instance using Docker and Docker Compose.
+This guide describes how to deploy the **Family Finance** application using **Docker and Docker Compose** on an existing private AWS EC2 instance.
+
+The AWS infrastructure is already created using Terraform. This guide does **not** recreate or modify the existing AWS infrastructure.
 
 ---
 
-## Tech Stack
+## 1. Existing Architecture
+
+The application uses the following existing AWS infrastructure:
+
+```text
+                    Internet
+                       |
+                       v
+              Existing ALB
+                       |
+                       v
+             Private EC2 Instance
+              (SSM Session Manager)
+                       |
+                 Docker Compose
+                  /          \
+                 /            \
+                v              v
+        Frontend Container   Backend Container
+        Nginx :80            Node.js :5000
+                |              |
+                +------->------+
+                       |
+                       v
+                Amazon DynamoDB
+```
+
+### Important
+
+The following AWS resources are already created and are **not created again** in this deployment:
+
+- VPC
+- Subnets
+- Security Groups
+- Application Load Balancer
+- Target Groups
+- EC2
+- IAM Role
+- DynamoDB
+- CloudWatch
+- Other Terraform-managed resources
+
+The deployment only installs Docker-related software and runs the application containers on the existing EC2 instance.
+
+---
+
+## 2. Technology Stack
 
 | Layer | Technology |
 |---|---|
-| Frontend | React (Vite), served via Nginx |
+| Frontend | React / Vite |
+| Frontend Server | Nginx |
 | Backend | Node.js / Express |
 | Database | Amazon DynamoDB |
-| AI Integration | Groq API |
-| Container Runtime | Docker / Docker Compose |
-| Hosting | AWS EC2 |
-| Infrastructure | Terraform (VPC, SG, ASG, ALB, CloudWatch) |
+| AI | Groq API |
+| Container Runtime | Docker |
+| Container Orchestration | Docker Compose |
+| Hosting | Existing AWS Private EC2 |
+| Access to EC2 | AWS Systems Manager Session Manager |
+| Infrastructure | Existing Terraform infrastructure |
 
-## Architecture
+---
 
-```
-                        EC2 Instance
-                        ────────────
-   Browser ──▶ frontend container (Nginx, port 3000)
-                        │
-                proxies /api → backend container (Node/Express, port 5000)
-                        │
-                Amazon DynamoDB (accessed via EC2 IAM Role)
-```
+## 3. Project Structure
 
-The backend authenticates to DynamoDB using the IAM Role attached to the EC2 instance — no AWS access keys are stored in the application or its containers.
-
-## Project Structure
-
-```
+```text
 family-finance-smart-money-management-for-your-family/
+│
 ├── backend/
 │   ├── Dockerfile
 │   ├── .dockerignore
-│   ├── .env                # not committed — created on the server
+│   ├── .env                 # created only on the server
 │   ├── package.json
+│   ├── package-lock.json
 │   └── server.js
+│
 ├── frontend/
 │   ├── Dockerfile
 │   ├── .dockerignore
 │   ├── nginx.conf
 │   ├── package.json
+│   ├── package-lock.json
 │   └── src/
+│
 ├── Terraform/
-├── .github/workflows/
+├── .github/
+│   └── workflows/
+│
 └── docker-compose.yml
 ```
 
 ---
 
-## Docker Files
+# 4. Docker Configuration
 
-### `backend/Dockerfile`
+## 4.1 Backend Dockerfile
+
+File:
+
+```text
+backend/Dockerfile
+```
 
 ```dockerfile
 FROM node:20-alpine
+
 WORKDIR /app
 
 COPY package*.json ./
+
 RUN npm ci --omit=dev
 
 COPY . .
 
 EXPOSE 5000
+
 USER node
 
 CMD ["node", "server.js"]
 ```
 
-### `backend/.dockerignore`
+---
 
+## 4.2 Backend `.dockerignore`
+
+File:
+
+```text
+backend/.dockerignore
 ```
+
+```text
 node_modules
 .git
 .env
@@ -83,25 +146,54 @@ npm-debug.log
 *.log
 ```
 
-### `frontend/Dockerfile`
+The `.env` file is excluded from the Docker image because application secrets should not be copied into the image.
+
+---
+
+## 4.3 Frontend Dockerfile
+
+File:
+
+```text
+frontend/Dockerfile
+```
 
 ```dockerfile
 FROM node:20-alpine AS build
+
 WORKDIR /app
+
 COPY package*.json ./
+
 RUN npm ci
+
 COPY . .
+
 RUN npm run build
 
+
 FROM nginx:alpine
+
 COPY --from=build /app/dist /usr/share/nginx/html
+
 COPY nginx.conf /etc/nginx/conf.d/default.conf
+
 EXPOSE 80
 ```
 
-### `frontend/.dockerignore`
+The frontend is built using Node.js and then served using Nginx.
 
+---
+
+## 4.4 Frontend `.dockerignore`
+
+File:
+
+```text
+frontend/.dockerignore
 ```
+
+```text
 node_modules
 .git
 .env
@@ -111,11 +203,20 @@ npm-debug.log
 *.log
 ```
 
-### `frontend/nginx.conf`
+---
+
+## 4.5 Nginx Configuration
+
+File:
+
+```text
+frontend/nginx.conf
+```
 
 ```nginx
 server {
     listen 80;
+
     root /usr/share/nginx/html;
     index index.html;
 
@@ -125,17 +226,30 @@ server {
 
     location /api/ {
         proxy_pass http://backend:5000/;
+
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
     }
 }
 ```
 
-### `docker-compose.yml`
+The hostname `backend` refers to the backend service inside the Docker Compose network.
+
+---
+
+# 5. Docker Compose
+
+File:
+
+```text
+docker-compose.yml
+```
+
+Use:
 
 ```yaml
-version: "3.9"
-
 services:
   backend:
     build: ./backend
@@ -156,118 +270,776 @@ services:
       - "3000:80"
 ```
 
-### `backend/.env` (server-side only, not committed)
+### Note
 
+The old:
+
+```yaml
+version: "3.9"
 ```
-PORT=5000
-NODE_ENV=production
-AWS_REGION=us-east-1
-JWT_SECRET=<strong-random-secret>
-GROQ_API_KEY=<groq-api-key>
-```
+
+line is intentionally removed because current Docker Compose versions no longer require it.
 
 ---
 
-## Deployment Steps
+# 6. Backend Environment Variables
 
-### 1. Connect to the EC2 instance
+The `.env` file must be created **only on the EC2 server**.
 
-```bash
-ssh -i your-key.pem ec2-user@<EC2_PUBLIC_IP>
+File:
+
+```text
+backend/.env
 ```
 
-### 2. Install Docker and Docker Compose
-
-```bash
-sudo yum update -y
-sudo yum install docker -y
-sudo systemctl start docker
-sudo systemctl enable docker
-sudo usermod -a -G docker ec2-user
-exit
-```
-
-Reconnect via SSH, then install Compose:
-
-```bash
-sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-sudo chmod +x /usr/local/bin/docker-compose
-```
-
-### 3. Clone the repository
-
-```bash
-git clone https://github.com/mahimapatel93/family-finance-smart-money-management-for-your-family.git
-cd family-finance-smart-money-management-for-your-family
-```
-
-### 4. Create the environment file
+Create it using:
 
 ```bash
 nano backend/.env
 ```
 
-Populate it with the values shown above.
+Add:
 
-### 5. Verify the EC2 IAM Role
-
-The instance must have an IAM Role with DynamoDB permissions attached (**EC2 → Security tab → IAM Role**). If none is attached:
-
-1. Create a role with the `AmazonDynamoDBFullAccess` policy (or a scoped equivalent)
-2. Attach it via **EC2 → Actions → Security → Modify IAM Role**
-
-### 6. Build and start the containers
-
-```bash
-docker-compose up --build -d
+```env
+PORT=5000
+NODE_ENV=production
+AWS_REGION=us-east-1
+JWT_SECRET=YOUR_STRONG_SECRET
+GROQ_API_KEY=YOUR_GROQ_API_KEY
 ```
 
-### 7. Verify the deployment
+### Security
+
+Do **not** commit `backend/.env` to GitHub.
+
+Do **not** put AWS access keys in this file.
+
+The backend should use the **IAM Role attached to the EC2 instance** to access DynamoDB.
+
+---
+
+# 7. Deployment Using SSM
+
+The EC2 instance is private, so do not use SSH or a public IP.
+
+## Step 1 — Connect to the EC2 instance
+
+Go to:
+
+```text
+AWS Console
+→ EC2
+→ Instances
+→ Select the private EC2 instance
+→ Connect
+→ Session Manager
+→ Connect
+```
+
+You will get a shell similar to:
+
+```text
+sh-5.2$
+```
+
+---
+
+# 8. Install Docker
+
+Run:
+
+```bash
+sudo dnf update -y
+```
+
+Install Docker:
+
+```bash
+sudo dnf install -y docker
+```
+
+Start Docker:
+
+```bash
+sudo systemctl enable --now docker
+```
+
+Check Docker:
+
+```bash
+docker --version
+```
+
+Check Docker service:
+
+```bash
+sudo systemctl status docker --no-pager
+```
+
+It should show:
+
+```text
+Active: active (running)
+```
+
+---
+
+# 9. Give the Current User Docker Permission
+
+Run:
+
+```bash
+sudo usermod -aG docker $(whoami)
+```
+
+Exit the SSM session:
+
+```bash
+exit
+```
+
+Then reconnect using:
+
+```text
+AWS Console
+→ EC2
+→ Connect
+→ Session Manager
+→ Connect
+```
+
+Check:
 
 ```bash
 docker ps
+```
+
+If there are no containers yet, an empty container list is normal.
+
+---
+
+# 10. Install Docker Compose
+
+Install Docker Compose:
+
+```bash
+sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" \
+-o /usr/local/bin/docker-compose
+```
+
+Make it executable:
+
+```bash
+sudo chmod +x /usr/local/bin/docker-compose
+```
+
+Check:
+
+```bash
+docker-compose version
+```
+
+Expected output will look similar to:
+
+```text
+Docker Compose version v5.x.x
+```
+
+---
+
+# 11. Clone the Application
+
+Move to the home directory:
+
+```bash
+cd ~
+```
+
+Clone the repository:
+
+```bash
+git clone https://github.com/mahimapatel93/family-finance-smart-money-management-for-your-family.git
+```
+
+Enter the project:
+
+```bash
+cd family-finance-smart-money-management-for-your-family
+```
+
+Check the files:
+
+```bash
+ls -la
+```
+
+You should see:
+
+```text
+backend
+frontend
+Terraform
+docker-compose.yml
+```
+
+---
+
+# 12. Create Backend Environment File
+
+Run:
+
+```bash
+nano backend/.env
+```
+
+Add:
+
+```env
+PORT=5000
+NODE_ENV=production
+AWS_REGION=us-east-1
+JWT_SECRET=YOUR_STRONG_SECRET
+GROQ_API_KEY=YOUR_GROQ_API_KEY
+```
+
+Save the file.
+
+Verify:
+
+```bash
+ls -la backend/.env
+```
+
+Do not display the contents of `.env` in terminal output if it contains real secrets.
+
+---
+
+# 13. Verify the EC2 IAM Role
+
+The existing private EC2 instance should already have an IAM Role.
+
+The role must allow the application to access the required DynamoDB tables.
+
+The application does not need:
+
+```text
+AWS_ACCESS_KEY_ID
+AWS_SECRET_ACCESS_KEY
+```
+
+inside `.env`.
+
+The AWS SDK can obtain credentials from the EC2 Instance Role.
+
+---
+
+# 14. Check Docker Before Building
+
+Run:
+
+```bash
+docker --version
+```
+
+```bash
+docker-compose version
+```
+
+```bash
+docker ps
+```
+
+All three commands should work.
+
+---
+
+# 15. Build the Docker Images
+
+From the project root:
+
+```bash
+docker-compose build
+```
+
+This builds:
+
+```text
+finance-backend
+finance-frontend
+```
+
+The frontend image contains the React production build and Nginx.
+
+The backend image contains the Node.js application.
+
+---
+
+# 16. Start the Application
+
+Run:
+
+```bash
+docker-compose up -d
+```
+
+Check containers:
+
+```bash
+docker ps
+```
+
+Expected containers:
+
+```text
+finance-backend
+finance-frontend
+```
+
+Both should show a running status such as:
+
+```text
+Up
+```
+
+---
+
+# 17. Check Backend Logs
+
+Run:
+
+```bash
 docker logs finance-backend --tail 50
+```
+
+Look for successful application startup and any DynamoDB or environment-variable errors.
+
+---
+
+# 18. Check Frontend Logs
+
+Run:
+
+```bash
 docker logs finance-frontend --tail 50
 ```
 
-### 8. Open the required port
+Nginx should start without errors.
 
-In the EC2 Security Group, allow inbound traffic on port `3000` (or restrict it to the Application Load Balancer's security group if traffic is routed through the ALB).
+---
 
-### 9. Access the application
+# 19. Check the Application Locally on EC2
 
+Because the EC2 instance is private, testing from the EC2 shell is useful.
+
+Check frontend:
+
+```bash
+curl http://localhost:3000
 ```
+
+Check backend:
+
+```bash
+curl http://localhost:5000
+```
+
+The exact backend response depends on the application's available routes.
+
+---
+
+# 20. Access Through the Existing ALB
+
+Do **not** access the application using:
+
+```text
 http://<EC2_PUBLIC_IP>:3000
 ```
 
----
+The EC2 instance is private.
 
-## Operations
+The expected traffic path is:
 
-| Command | Purpose |
-|---|---|
-| `docker-compose up --build -d` | Build and start all services in the background |
-| `docker-compose down` | Stop and remove all containers |
-| `docker-compose logs backend` | View backend logs |
-| `docker ps` | List running containers |
-| `docker exec -it finance-backend sh` | Open a shell inside the backend container |
+```text
+Browser
+   ↓
+Existing ALB
+   ↓
+Private EC2
+   ↓
+Frontend Container :3000 → Nginx :80
+   ↓
+Backend Container :5000
+   ↓
+DynamoDB
+```
 
-### Redeploying after a code update
+Use the existing ALB DNS name or existing application domain.
 
-```bash
-git pull
-docker-compose down
-docker-compose up --build -d
+For example:
+
+```text
+http://<EXISTING-ALB-DNS>
+```
+
+or, if HTTPS/domain is already configured:
+
+```text
+https://<YOUR-DOMAIN>
 ```
 
 ---
 
-## Troubleshooting
+# 21. Important ALB Configuration
 
-| Issue | Resolution |
-|---|---|
-| Application not reachable on port 3000 | Confirm the Security Group allows inbound traffic on that port |
-| Backend container exits immediately | Check `docker logs finance-backend` — usually a missing environment variable |
-| Backend cannot reach DynamoDB | Verify the IAM Role is attached to the EC2 instance |
-| `npm ci` fails during build | Ensure `package-lock.json` is present in `backend/` and `frontend/` |
-| `docker` commands return "permission denied" | Reconnect via SSH after running `usermod -a -G docker` |
+The existing ALB target group must point to the correct application port.
+
+With the current Compose configuration:
+
+```yaml
+ports:
+  - "3000:80"
+```
+
+the frontend is available on the EC2 host at:
+
+```text
+EC2:3000
+```
+
+Therefore, the existing ALB target group should send frontend traffic to the EC2 instance on port:
+
+```text
+3000
+```
+
+The backend does not need to be directly exposed through the ALB because Nginx forwards:
+
+```text
+/api/*
+```
+
+to:
+
+```text
+backend:5000
+```
+
+---
+
+# 22. Verify Containers
+
+Run:
+
+```bash
+docker ps
+```
+
+Example:
+
+```text
+CONTAINER ID   IMAGE             STATUS         PORTS
+xxxx           finance-backend  Up             0.0.0.0:5000->5000/tcp
+xxxx           finance-frontend Up             0.0.0.0:3000->80/tcp
+```
+
+---
+
+# 23. Useful Docker Commands
+
+### List running containers
+
+```bash
+docker ps
+```
+
+### List all containers
+
+```bash
+docker ps -a
+```
+
+### View backend logs
+
+```bash
+docker logs finance-backend --tail 50
+```
+
+### View frontend logs
+
+```bash
+docker logs finance-frontend --tail 50
+```
+
+### Follow backend logs
+
+```bash
+docker logs -f finance-backend
+```
+
+### Follow frontend logs
+
+```bash
+docker logs -f finance-frontend
+```
+
+### Stop containers
+
+```bash
+docker-compose down
+```
+
+### Start containers
+
+```bash
+docker-compose up -d
+```
+
+### Rebuild and start after code changes
+
+```bash
+docker-compose down
+docker-compose build
+docker-compose up -d
+```
+
+### Open a shell inside backend
+
+```bash
+docker exec -it finance-backend sh
+```
+
+### Open a shell inside frontend
+
+```bash
+docker exec -it finance-frontend sh
+```
+
+---
+
+# 24. Redeployment After GitHub Changes
+
+When new code is pushed to GitHub:
+
+```bash
+cd ~/family-finance-smart-money-management-for-your-family
+```
+
+Pull the latest code:
+
+```bash
+git pull
+```
+
+Rebuild:
+
+```bash
+docker-compose build
+```
+
+Restart:
+
+```bash
+docker-compose down
+docker-compose up -d
+```
+
+Verify:
+
+```bash
+docker ps
+```
+
+---
+
+# 25. Troubleshooting
+
+## Docker command not found
+
+Check:
+
+```bash
+which docker
+```
+
+If Docker is not installed:
+
+```bash
+sudo dnf install -y docker
+sudo systemctl enable --now docker
+```
+
+---
+
+## Docker permission denied
+
+Run:
+
+```bash
+sudo usermod -aG docker $(whoami)
+```
+
+Then exit the SSM session and reconnect.
+
+Check:
+
+```bash
+docker ps
+```
+
+---
+
+## Docker Compose command not found
+
+Check:
+
+```bash
+docker-compose version
+```
+
+If missing:
+
+```bash
+sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" \
+-o /usr/local/bin/docker-compose
+
+sudo chmod +x /usr/local/bin/docker-compose
+```
+
+---
+
+## `.env` not found
+
+Check:
+
+```bash
+ls -la backend/.env
+```
+
+If missing:
+
+```bash
+nano backend/.env
+```
+
+Create the file with the required environment variables.
+
+---
+
+## Backend container exits
+
+Check:
+
+```bash
+docker logs finance-backend --tail 100
+```
+
+Check:
+
+- `JWT_SECRET`
+- `GROQ_API_KEY`
+- `AWS_REGION`
+- DynamoDB permissions
+- application startup errors
+
+---
+
+## Backend cannot access DynamoDB
+
+Verify that the EC2 instance has the correct IAM Role.
+
+The application should use the EC2 IAM Role rather than hard-coded AWS credentials.
+
+---
+
+## Frontend is not loading
+
+Check:
+
+```bash
+docker logs finance-frontend --tail 100
+```
+
+Also check:
+
+```bash
+docker ps
+```
+
+Then verify the existing ALB target group and security group configuration.
+
+---
+
+## ALB returns 502
+
+Check whether the frontend container is running:
+
+```bash
+docker ps
+```
+
+Then test from the EC2 instance:
+
+```bash
+curl http://localhost:3000
+```
+
+If this works but the ALB returns 502, check the existing ALB target group and EC2 security group.
+
+---
+
+# 26. Final Deployment Checklist
+
+Before considering the deployment complete:
+
+```text
+[ ] Private EC2 is accessible through SSM
+[ ] Docker installed
+[ ] Docker service running
+[ ] Current user has Docker permission
+[ ] Docker Compose installed
+[ ] GitHub repository cloned
+[ ] backend/.env created
+[ ] EC2 IAM Role has required DynamoDB permissions
+[ ] Backend Docker image built
+[ ] Frontend Docker image built
+[ ] Backend container running
+[ ] Frontend container running
+[ ] Backend logs checked
+[ ] Frontend logs checked
+[ ] localhost:3000 tested on EC2
+[ ] Existing ALB target group points to port 3000
+[ ] Existing security groups allow ALB → EC2 traffic
+[ ] Application accessible through existing ALB/domain
+```
+
+---
+
+## Deployment Summary
+
+The complete deployment process is:
+
+```text
+SSM
+ ↓
+Private EC2
+ ↓
+Install Docker
+ ↓
+Install Docker Compose
+ ↓
+Clone GitHub repository
+ ↓
+Create backend/.env
+ ↓
+Build Docker images
+ ↓
+Start Docker Compose
+ ↓
+Check containers and logs
+ ↓
+Existing ALB
+ ↓
+Application
+```
+
+No new AWS infrastructure is created during this process.
