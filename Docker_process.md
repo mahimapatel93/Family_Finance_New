@@ -1,3 +1,1126 @@
+# Family Finance – Complete Local Docker Setup Guide
+
+This guide explains how to set up and run the Family Finance application locally using Docker, Docker Compose, AWS CLI, and Amazon DynamoDB.
+
+---
+
+# 1. Prerequisites
+
+Before starting, install the following:
+
+* Git
+* Docker Desktop
+* AWS CLI
+* Node.js (optional for local development outside Docker)
+* VS Code (optional)
+
+The application uses:
+
+```text
+Frontend  → React
+Backend   → Node.js + Express
+Database  → Amazon DynamoDB
+Container → Docker
+Cloud     → AWS
+```
+
+AWS Region used by the application:
+
+```text
+us-east-1
+```
+
+---
+
+# 2. Install Git
+
+Check whether Git is already installed:
+
+```bash
+git --version
+```
+
+If Git is not installed, download and install Git from the official Git website.
+
+After installation, verify:
+
+```bash
+git --version
+```
+
+Example:
+
+```text
+git version 2.x.x
+```
+
+---
+
+# 3. Install Docker Desktop
+
+Install Docker Desktop for Windows.
+
+After installation:
+
+1. Start Docker Desktop.
+2. Wait until Docker shows that it is running.
+3. Open Git Bash or PowerShell.
+
+Check Docker:
+
+```bash
+docker --version
+```
+
+Example:
+
+```text
+Docker version 28.x.x
+```
+
+Check Docker Compose:
+
+```bash
+docker-compose --version
+```
+
+or:
+
+```bash
+docker compose version
+```
+
+Example:
+
+```text
+Docker Compose version v2.x.x
+```
+
+---
+
+# 4. Verify Docker Installation
+
+Run:
+
+```bash
+docker run hello-world
+```
+
+If Docker is installed correctly, Docker will download and run the `hello-world` image.
+
+This confirms that Docker is working correctly.
+
+---
+
+# 5. Install AWS CLI
+
+The application uses Amazon DynamoDB, so AWS CLI is required to configure and verify AWS resources.
+
+Check whether AWS CLI is already installed:
+
+```bash
+aws --version
+```
+
+If AWS CLI is not installed, install AWS CLI for Windows.
+
+After installation, verify:
+
+```bash
+aws --version
+```
+
+Example:
+
+```text
+aws-cli/2.x.x Python/3.x Windows/...
+```
+
+---
+
+# 6. Configure AWS CLI
+
+Configure AWS credentials:
+
+```bash
+aws configure
+```
+
+Enter the following when prompted:
+
+```text
+AWS Access Key ID:
+AWS Secret Access Key:
+Default region name:
+Default output format:
+```
+
+For this project:
+
+```text
+Default region name: us-east-1
+Default output format: json
+```
+
+Example:
+
+```text
+AWS Access Key ID: ********
+AWS Secret Access Key: ********
+Default region name: us-east-1
+Default output format: json
+```
+
+> Never commit AWS access keys or secret keys to GitHub.
+
+---
+
+# 7. Verify AWS Credentials
+
+Check the AWS identity:
+
+```bash
+aws sts get-caller-identity
+```
+
+Example:
+
+```json
+{
+    "UserId": "XXXXXXXX",
+    "Account": "XXXXXXXXXXXX",
+    "Arn": "arn:aws:iam::XXXXXXXXXXXX:user/username"
+}
+```
+
+This confirms that AWS CLI is authenticated.
+
+---
+
+# 8. Verify AWS Region
+
+Run:
+
+```bash
+aws configure get region
+```
+
+Expected:
+
+```text
+us-east-1
+```
+
+If it is not `us-east-1`, configure it:
+
+```bash
+aws configure set region us-east-1
+```
+
+Verify again:
+
+```bash
+aws configure get region
+```
+
+---
+
+# 9. Clone the Project
+
+Clone the project repository:
+
+```bash
+git clone <YOUR_REPOSITORY_URL>
+```
+
+Example:
+
+```bash
+git clone https://github.com/<username>/<repository>.git
+```
+
+Move into the project:
+
+```bash
+cd family-finance-smart-money-management-for-your-family
+```
+
+Check files:
+
+```bash
+ls
+```
+
+You should see files/folders similar to:
+
+```text
+backend/
+frontend/
+docker-compose.yml
+README.md
+...
+```
+
+---
+
+# 10. Check Docker Compose File
+
+Verify that the project contains:
+
+```text
+docker-compose.yml
+```
+
+Open it:
+
+```bash
+cat docker-compose.yml
+```
+
+The Docker Compose configuration should define the required application services.
+
+---
+
+# 11. Check Backend Configuration
+
+Go to the backend:
+
+```bash
+cd backend
+```
+
+Check files:
+
+```bash
+ls
+```
+
+Important files include:
+
+```text
+package.json
+server.js
+config/
+controllers/
+middleware/
+scripts/
+```
+
+Go back to the project root:
+
+```bash
+cd ..
+```
+
+---
+
+# 12. Check DynamoDB Configuration
+
+The DynamoDB configuration is located at:
+
+```text
+backend/config/dynamodb.js
+```
+
+The application uses these tables:
+
+```text
+finance_users
+finance_families
+finance_expenses
+finance_bills
+finance_investments
+```
+
+The AWS region is:
+
+```text
+us-east-1
+```
+
+---
+
+# 13. Check Existing DynamoDB Tables
+
+Before creating tables, check what already exists:
+
+```bash
+aws dynamodb list-tables --region us-east-1
+```
+
+Example:
+
+```json
+{
+    "TableNames": [
+        "prod-family-finance"
+    ]
+}
+```
+
+If the required application tables are missing, create them using the project's setup script.
+
+---
+
+# 14. Start Docker Containers
+
+From the project root:
+
+```bash
+docker-compose up -d
+```
+
+This builds/starts the required containers.
+
+Check container status:
+
+```bash
+docker-compose ps
+```
+
+Example:
+
+```text
+NAME              STATUS
+finance-backend   Up
+finance-frontend  Up
+```
+
+---
+
+# 15. Build Containers
+
+If the Docker images have not been built yet, run:
+
+```bash
+docker-compose build
+```
+
+Then start:
+
+```bash
+docker-compose up -d
+```
+
+For a fresh rebuild:
+
+```bash
+docker-compose build --no-cache
+```
+
+Then:
+
+```bash
+docker-compose up -d
+```
+
+---
+
+# 16. Check Backend Logs
+
+Check the last 100 backend log lines:
+
+```bash
+docker-compose logs backend --tail 100
+```
+
+For live logs:
+
+```bash
+docker-compose logs -f backend
+```
+
+The backend should show something similar to:
+
+```text
+Family Finance API Server Running
+Port    : 5000
+Env     : production
+Region  : us-east-1
+```
+
+---
+
+# 17. Verify AWS Region Inside Docker
+
+Check the AWS region used by the backend container:
+
+```bash
+docker-compose exec backend printenv | grep -E "AWS_REGION|AWS_DEFAULT_REGION|DYNAMODB"
+```
+
+Expected:
+
+```text
+AWS_REGION=us-east-1
+```
+
+---
+
+# 18. Verify DynamoDB Table Names Inside Docker
+
+Run:
+
+```bash
+docker-compose exec backend node -e "const {TABLES}=require('./config/dynamodb'); console.log(TABLES)"
+```
+
+Expected:
+
+```text
+{
+  USERS: 'finance_users',
+  FAMILIES: 'finance_families',
+  EXPENSES: 'finance_expenses',
+  BILLS: 'finance_bills',
+  INVESTMENTS: 'finance_investments'
+}
+```
+
+---
+
+# 19. Check DynamoDB Access From Docker
+
+Run:
+
+```bash
+docker-compose exec backend node -e "const {DynamoDBClient,ListTablesCommand}=require('@aws-sdk/client-dynamodb'); const c=new DynamoDBClient({region:process.env.AWS_REGION||'us-east-1'}); c.send(new ListTablesCommand({})).then(x=>console.log(x.TableNames)).catch(e=>console.error(e.name,e.message))"
+```
+
+This checks whether the backend container can access DynamoDB.
+
+Expected after setup:
+
+```text
+[
+  'finance_bills',
+  'finance_expenses',
+  'finance_families',
+  'finance_investments',
+  'finance_users'
+]
+```
+
+---
+
+# 20. Create DynamoDB Tables
+
+The project already contains:
+
+```text
+backend/scripts/setupDynamoDB.js
+```
+
+Run the setup script inside the backend container:
+
+```bash
+docker-compose exec backend node scripts/setupDynamoDB.js
+```
+
+This creates:
+
+```text
+finance_users
+finance_families
+finance_expenses
+finance_bills
+finance_investments
+```
+
+---
+
+# 21. Verify DynamoDB Tables Again
+
+Run:
+
+```bash
+aws dynamodb list-tables --region us-east-1
+```
+
+Expected:
+
+```text
+finance_bills
+finance_expenses
+finance_families
+finance_investments
+finance_users
+```
+
+If another table such as:
+
+```text
+prod-family-finance
+```
+
+exists, do not delete it unless its purpose is confirmed.
+
+---
+
+# 22. Verify Individual Tables
+
+Check the users table:
+
+```bash
+aws dynamodb describe-table \
+  --table-name finance_users \
+  --region us-east-1
+```
+
+Check the families table:
+
+```bash
+aws dynamodb describe-table \
+  --table-name finance_families \
+  --region us-east-1
+```
+
+Check expenses:
+
+```bash
+aws dynamodb describe-table \
+  --table-name finance_expenses \
+  --region us-east-1
+```
+
+Check bills:
+
+```bash
+aws dynamodb describe-table \
+  --table-name finance_bills \
+  --region us-east-1
+```
+
+Check investments:
+
+```bash
+aws dynamodb describe-table \
+  --table-name finance_investments \
+  --region us-east-1
+```
+
+---
+
+# 23. Check Frontend
+
+The frontend runs locally on:
+
+```text
+http://localhost:3000
+```
+
+Open it in a browser:
+
+```text
+http://localhost:3000
+```
+
+---
+
+# 24. Check Backend API
+
+The backend runs on:
+
+```text
+http://localhost:5000
+```
+
+If the project has a health endpoint, test:
+
+```text
+http://localhost:5000/health
+```
+
+or use the API endpoint defined by the project.
+
+---
+
+# 25. Test Signup
+
+Open:
+
+```text
+http://localhost:3000/signup
+```
+
+Create a test account.
+
+The request should reach:
+
+```text
+POST /api/auth/signup
+```
+
+The user should be stored in:
+
+```text
+finance_users
+```
+
+---
+
+# 26. Verify User in DynamoDB
+
+Run:
+
+```bash
+aws dynamodb scan \
+  --table-name finance_users \
+  --region us-east-1
+```
+
+If signup was successful, the created user should appear in the response.
+
+---
+
+# 27. Test Login
+
+After successful signup:
+
+1. Open the login page.
+2. Enter the same email/username.
+3. Enter the password.
+4. Click Login.
+
+Check backend logs if login fails:
+
+```bash
+docker-compose logs backend --tail 100
+```
+
+---
+
+# 28. Useful Docker Commands
+
+## Start application
+
+```bash
+docker-compose up -d
+```
+
+## Stop application
+
+```bash
+docker-compose down
+```
+
+## Restart all services
+
+```bash
+docker-compose restart
+```
+
+## Restart backend
+
+```bash
+docker-compose restart backend
+```
+
+## Restart frontend
+
+```bash
+docker-compose restart frontend
+```
+
+## Check containers
+
+```bash
+docker-compose ps
+```
+
+## View backend logs
+
+```bash
+docker-compose logs backend --tail 100
+```
+
+## View frontend logs
+
+```bash
+docker-compose logs frontend --tail 100
+```
+
+## Follow backend logs
+
+```bash
+docker-compose logs -f backend
+```
+
+## Follow all logs
+
+```bash
+docker-compose logs -f
+```
+
+## Enter backend container
+
+```bash
+docker-compose exec backend sh
+```
+
+## Enter frontend container
+
+```bash
+docker-compose exec frontend sh
+```
+
+---
+
+# 29. Rebuild After Code Changes
+
+If backend code is changed:
+
+```bash
+docker-compose build backend
+```
+
+Then:
+
+```bash
+docker-compose up -d backend
+```
+
+For both frontend and backend:
+
+```bash
+docker-compose build
+docker-compose up -d
+```
+
+For a completely fresh rebuild:
+
+```bash
+docker-compose down
+docker-compose build --no-cache
+docker-compose up -d
+```
+
+---
+
+# 30. Troubleshooting
+
+## Problem: Container is not running
+
+Check:
+
+```bash
+docker-compose ps
+```
+
+Then check logs:
+
+```bash
+docker-compose logs backend --tail 100
+```
+
+---
+
+## Problem: DynamoDB `ResourceNotFoundException`
+
+If backend logs show:
+
+```text
+ResourceNotFoundException: Requested resource not found
+```
+
+Check tables:
+
+```bash
+aws dynamodb list-tables --region us-east-1
+```
+
+If the required tables are missing:
+
+```bash
+docker-compose exec backend node scripts/setupDynamoDB.js
+```
+
+Then verify again:
+
+```bash
+aws dynamodb list-tables --region us-east-1
+```
+
+---
+
+## Problem: AWS Region is incorrect
+
+Check:
+
+```bash
+aws configure get region
+```
+
+Set:
+
+```bash
+aws configure set region us-east-1
+```
+
+Check Docker:
+
+```bash
+docker-compose exec backend printenv | grep AWS_REGION
+```
+
+Expected:
+
+```text
+AWS_REGION=us-east-1
+```
+
+---
+
+## Problem: Docker cannot access AWS
+
+Check AWS CLI:
+
+```bash
+aws sts get-caller-identity
+```
+
+Then check DynamoDB:
+
+```bash
+aws dynamodb list-tables --region us-east-1
+```
+
+If AWS CLI works but Docker does not, check how AWS credentials are provided to the Docker container in `docker-compose.yml`.
+
+---
+
+## Problem: Port 5000 already in use
+
+Check which process is using port 5000.
+
+On Windows:
+
+```bash
+netstat -ano | findstr :5000
+```
+
+Then stop the conflicting process if necessary.
+
+Alternatively, restart the backend:
+
+```bash
+docker-compose restart backend
+```
+
+---
+
+## Problem: Port 3000 already in use
+
+Check:
+
+```bash
+netstat -ano | findstr :3000
+```
+
+Stop the conflicting process or change the frontend port in the Docker Compose configuration.
+
+---
+
+# 31. Docker Compose Warning
+
+You may see:
+
+```text
+the attribute `version` is obsolete, it will be ignored
+```
+
+This is a Docker Compose warning.
+
+The application can still run.
+
+The old `version:` property can be removed from `docker-compose.yml` as a cleanup step.
+
+---
+
+# 32. AWS SDK Node.js Warning
+
+You may see a warning such as:
+
+```text
+NodeVersionSupportWarning
+```
+
+For example:
+
+```text
+You are running node v20.20.2.
+```
+
+This is an AWS SDK compatibility warning.
+
+It does not cause the DynamoDB `ResourceNotFoundException`.
+
+The immediate DynamoDB issue is fixed by ensuring the required tables exist.
+
+---
+
+# 33. Complete Setup Flow
+
+```text
+Install Git
+     ↓
+Install Docker Desktop
+     ↓
+Install AWS CLI
+     ↓
+Configure AWS CLI
+     ↓
+Verify AWS credentials
+     ↓
+Verify AWS region
+     ↓
+Clone repository
+     ↓
+Open project directory
+     ↓
+Check docker-compose.yml
+     ↓
+Build Docker images
+     ↓
+Start Docker containers
+     ↓
+Check container status
+     ↓
+Check backend logs
+     ↓
+Verify AWS_REGION inside Docker
+     ↓
+Verify DynamoDB configuration
+     ↓
+Check DynamoDB tables
+     ↓
+Run setupDynamoDB.js
+     ↓
+Verify DynamoDB tables
+     ↓
+Open frontend
+     ↓
+Test Signup
+     ↓
+Test Login
+     ↓
+Verify data in DynamoDB
+```
+
+---
+
+# 34. Quick Start Commands
+
+Once all prerequisites are installed and AWS CLI is configured, the basic setup is:
+
+```bash
+git clone <YOUR_REPOSITORY_URL>
+
+cd family-finance-smart-money-management-for-your-family
+
+docker-compose build
+
+docker-compose up -d
+
+docker-compose ps
+
+docker-compose logs backend --tail 100
+
+docker-compose exec backend node scripts/setupDynamoDB.js
+
+aws dynamodb list-tables --region us-east-1
+```
+
+Then open:
+
+```text
+http://localhost:3000
+```
+
+---
+
+# 35. Final Local Environment
+
+| Component            | Configuration    |
+| -------------------- | ---------------- |
+| Operating System     | Windows          |
+| Container Runtime    | Docker Desktop   |
+| Container Management | Docker Compose   |
+| Frontend             | localhost:3000   |
+| Backend              | localhost:5000   |
+| Backend Runtime      | Node.js          |
+| Database             | Amazon DynamoDB  |
+| AWS Region           | us-east-1        |
+| Backend Deployment   | Docker Container |
+| DynamoDB Setup       | setupDynamoDB.js |
+
+---
+
+# 36. Important Security Notes
+
+Do not commit AWS credentials to Git.
+
+Never add the following to GitHub:
+
+```text
+AWS_ACCESS_KEY_ID
+AWS_SECRET_ACCESS_KEY
+.env
+.env.local
+```
+
+Make sure sensitive files are included in `.gitignore`.
+
+Example:
+
+```text
+.env
+.env.*
+!.env.example
+```
+
+Use `.env.example` for documenting required environment variables without exposing secrets.
+
+---
+
+# Local Setup Completed
+
+The Family Finance application is ready to run locally with:
+
+```text
+Docker
+   ↓
+Frontend
+   ↓
+Backend
+   ↓
+AWS DynamoDB
+```
+
+The backend uses AWS DynamoDB in:
+
+```text
+us-east-1
+```
+
+and the required application tables are:
+
+```text
+finance_users
+finance_families
+finance_expenses
+finance_bills
+finance_investments
+```
+
+
+
+
+
+
+
+
+
 # Docker Deployment Guide
 
 This guide describes how to deploy the **Family Finance** application using **Docker and Docker Compose** on an existing private AWS EC2 instance.
