@@ -1,5 +1,6 @@
-# Family Finance – Complete Local Docker Setup Guide
+# Family Finance – Docker Setup & Deployment Guide
 
+## Part 1 – Local Docker Setup
 This guide explains how to set up and run the Family Finance application locally using Docker, Docker Compose, AWS CLI, and Amazon DynamoDB.
 
 ---
@@ -1117,8 +1118,7 @@ finance_investments
 
 
 
-
-
+## Part 2 – Docker Deployment on AWS EC2
 
 
 # Docker Deployment Guide
